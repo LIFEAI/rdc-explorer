@@ -1,5 +1,5 @@
 """
-create_icon.py — Generates RDC Dashboard app icon
+create_icon.py — Generates RDC Explorer app icon
 Produces: assets/icon.ico (Windows), assets/icon.icns (Mac), assets/icon.png
 Run once before building: python assets/create_icon.py
 Requires: pip install pillow

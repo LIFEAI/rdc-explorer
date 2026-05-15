@@ -1,14 +1,14 @@
 ; ============================================================
-;  RDC Dashboard — Inno Setup Script
-;  Produces: dist\RDC_Dashboard_Setup.exe
+;  RDC Explorer — Inno Setup Script
+;  Produces: dist\RDC_Explorer_Setup.exe
 ;  Requires: Inno Setup 6+ (https://jrsoftware.org/isinfo.php)
 ; ============================================================
 
-#define AppName      "RDC Dashboard"
-#define AppVersion   "1.0.0"
+#define AppName      "RDC Explorer"
+#define AppVersion   "2.0.0"
 #define AppPublisher "Regenerative Development Corp"
 #define AppURL       "https://regendevcorp.com"
-#define AppExeName   "RDC_Dashboard.exe"
+#define AppExeName   "RDC_Explorer.exe"
 
 [Setup]
 AppId={{F3A2C8E1-4D9B-4F7A-B3C2-8E5D1A9F0B4C}
@@ -23,7 +23,7 @@ DefaultGroupName={#AppName}
 AllowNoIcons=yes
 ; Output
 OutputDir=..\dist
-OutputBaseFilename=RDC_Dashboard_Setup_v{#AppVersion}
+OutputBaseFilename=RDC_Explorer_Setup_v{#AppVersion}
 ; Compression
 Compression=lzma2/ultra64
 SolidCompression=yes
@@ -47,7 +47,7 @@ Name: "startuptray";   Description: "Start in &system tray on login";    GroupDe
 
 [Files]
 ; Main executable (built by PyInstaller)
-Source: "..\dist\RDC_Dashboard.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\dist\RDC_Explorer.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 ; Start Menu

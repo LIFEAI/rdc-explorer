@@ -1,13 +1,13 @@
 """
 mru_manager.py — Global MRU + Settings manager
-Stores data in %APPDATA%/RDC_Dashboard/ (Windows) or ~/.config/RDC_Dashboard/ (Mac/Linux)
+Stores data in %APPDATA%/RDC_Explorer/ (Windows) or ~/.config/RDC_Explorer/ (Mac/Linux)
 """
 import json
 import os
 import sys
 from pathlib import Path
 
-APP_NAME = "RDC_Dashboard"
+APP_NAME = "RDC_Explorer"
 MAX_MRU = 20
 
 

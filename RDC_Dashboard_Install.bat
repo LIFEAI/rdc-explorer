@@ -1,19 +1,19 @@
 @echo off
 setlocal EnableDelayedExpansion
-title RDC Dashboard — Installer
+title RDC Explorer — Installer
 color 0A
 
 echo.
 echo  ============================================================
-echo    RDC Dashboard Installer
+echo    RDC Explorer Installer
 echo    Regenerative Development Corp
 echo  ============================================================
 echo.
 pause
 
 :: ── Paths ─────────────────────────────────────────────────────
-set INSTALL_DIR=%LOCALAPPDATA%\RDC_Dashboard
-set TEMP_DIR=%TEMP%\RDC_Dashboard_Install
+set INSTALL_DIR=%LOCALAPPDATA%\RDC_Explorer
+set TEMP_DIR=%TEMP%\RDC_Explorer_Install
 set REPO_ZIP=%TEMP_DIR%\repo.zip
 set REPO_URL=https://github.com/LIFEAI/rdc-ai-dashboard/archive/refs/heads/main.zip
 
@@ -35,7 +35,7 @@ mkdir "%TEMP_DIR%"
 mkdir "%INSTALL_DIR%"
 
 :: ── Download ──────────────────────────────────────────────────
-echo  [..] Downloading RDC Dashboard...
+echo  [..] Downloading RDC Explorer...
 powershell -NoProfile -Command "& {[Net.ServicePointManager]::SecurityProtocol='Tls12'; (New-Object Net.WebClient).DownloadFile('%REPO_URL%','%REPO_ZIP%')}"
 if not exist "%REPO_ZIP%" ( echo  [ERROR] Download failed. & pause & exit /b 1 )
 echo  [OK] Downloaded.
@@ -63,23 +63,23 @@ echo  [OK] Icons ready.
     echo set QT_QPA_PLATFORM_PLUGIN_PATH=%LOCALAPPDATA%\Programs\Python\Python312\Lib\site-packages\PyQt6\Qt6\plugins\platforms
     echo cd /d "%INSTALL_DIR%"
     echo python "%INSTALL_DIR%\src\rdc_dashboard.py"
-) > "%INSTALL_DIR%\RDC_Dashboard.bat"
+) > "%INSTALL_DIR%\RDC_Explorer.bat"
 
 :: ── Desktop shortcut ──────────────────────────────────────────
 echo  [..] Creating shortcuts...
-powershell -NoProfile -Command "$ws=New-Object -ComObject WScript.Shell; $s=$ws.CreateShortcut([Environment]::GetFolderPath('Desktop')+'\RDC Dashboard.lnk'); $s.TargetPath='%INSTALL_DIR%\RDC_Dashboard.bat'; $s.WorkingDirectory='%INSTALL_DIR%'; $s.IconLocation='%INSTALL_DIR%\assets\icon.ico'; $s.Description='RDC AI Dashboard'; $s.Save()"
+powershell -NoProfile -Command "$ws=New-Object -ComObject WScript.Shell; $s=$ws.CreateShortcut([Environment]::GetFolderPath('Desktop')+'\RDC Explorer.lnk'); $s.TargetPath='%INSTALL_DIR%\RDC_Explorer.bat'; $s.WorkingDirectory='%INSTALL_DIR%'; $s.IconLocation='%INSTALL_DIR%\assets\icon.ico'; $s.Description='RDC Explorer'; $s.Save()"
 
 :: ── Start Menu ────────────────────────────────────────────────
-set START_DIR=%APPDATA%\Microsoft\Windows\Start Menu\Programs\RDC Dashboard
+set START_DIR=%APPDATA%\Microsoft\Windows\Start Menu\Programs\RDC Explorer
 mkdir "%START_DIR%" >nul 2>&1
-powershell -NoProfile -Command "$ws=New-Object -ComObject WScript.Shell; $s=$ws.CreateShortcut('%START_DIR%\RDC Dashboard.lnk'); $s.TargetPath='%INSTALL_DIR%\RDC_Dashboard.bat'; $s.WorkingDirectory='%INSTALL_DIR%'; $s.IconLocation='%INSTALL_DIR%\assets\icon.ico'; $s.Description='RDC AI Dashboard'; $s.Save()"
+powershell -NoProfile -Command "$ws=New-Object -ComObject WScript.Shell; $s=$ws.CreateShortcut('%START_DIR%\RDC Explorer.lnk'); $s.TargetPath='%INSTALL_DIR%\RDC_Explorer.bat'; $s.WorkingDirectory='%INSTALL_DIR%'; $s.IconLocation='%INSTALL_DIR%\assets\icon.ico'; $s.Description='RDC Explorer'; $s.Save()"
 (
     echo @echo off
     echo rmdir /s /q "%INSTALL_DIR%"
-    echo del /f /q "%USERPROFILE%\Desktop\RDC Dashboard.lnk"
+    echo del /f /q "%USERPROFILE%\Desktop\RDC Explorer.lnk"
     echo rmdir /s /q "%START_DIR%"
     echo echo Done. & pause
-) > "%START_DIR%\Uninstall RDC Dashboard.bat"
+) > "%START_DIR%\Uninstall RDC Explorer.bat"
 echo  [OK] Shortcuts created.
 
 :: ── Cleanup ───────────────────────────────────────────────────
@@ -92,6 +92,6 @@ echo    Done! Launch from Desktop or Start Menu.
 echo  ============================================================
 echo.
 set /p LAUNCH="  Launch now? (Y/N): "
-if /i "%LAUNCH%"=="Y" start "" "%INSTALL_DIR%\RDC_Dashboard.bat"
+if /i "%LAUNCH%"=="Y" start "" "%INSTALL_DIR%\RDC_Explorer.bat"
 echo.
 pause

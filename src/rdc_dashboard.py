@@ -1,5 +1,5 @@
 """
-rdc_dashboard.py — RDC AI Dashboard
+rdc_dashboard.py — RDC Explorer
 PyQt6 desktop app. Single codebase for Windows and Mac.
 
 Usage:
@@ -23,7 +23,8 @@ from PyQt6.QtCore import (
     Qt, QDir, QModelIndex, pyqtSignal, QObject, QThread,
 )
 from PyQt6.QtGui import (
-    QFileSystemModel, QAction, QIcon, QPixmap, QPainter, QColor, QFont,
+    QFileSystemModel,  # Moved from QtWidgets to QtGui in PyQt6
+    QAction, QIcon, QPixmap, QPainter, QColor, QFont,
 )
 
 import mru_manager as mru
@@ -423,10 +424,14 @@ class AIToolsPanel(QWidget):
             )
             return r.choices[0].message.content
         elif model.startswith("gemini"):
-            import google.generativeai as genai
-            genai.configure(api_key=keys.get("google", ""))
-            m = genai.GenerativeModel(model, system_instruction=system)
-            return m.generate_content(msg).text
+            import google.genai as genai
+            client = genai.Client(api_key=keys.get("google", ""))
+            response = client.models.generate_content(
+                model=model,
+                contents=msg,
+                config=genai.types.GenerateContentConfig(system_instruction=system),
+            )
+            return response.text
         return "Unknown model."
 
     def _on_result(self, text: str):
@@ -530,7 +535,7 @@ class MainWindow(QMainWindow):
     def __init__(self, settings: dict):
         super().__init__()
         self.settings = settings
-        self.setWindowTitle("RDC AI Dashboard")
+        self.setWindowTitle("RDC Explorer")
         self.resize(settings["window"]["w"], settings["window"]["h"])
         self.move(settings["window"]["x"], settings["window"]["y"])
 
@@ -548,7 +553,7 @@ class MainWindow(QMainWindow):
         sidebar_layout.setContentsMargins(0, 0, 0, 0)
         sidebar_layout.setSpacing(0)
 
-        logo = QLabel("  🏗 RDC Dashboard")
+        logo = QLabel("  🏗 RDC Explorer")
         logo.setStyleSheet("font-size:14px; font-weight:bold; color:#5bc0de; padding:16px 8px;")
         sidebar_layout.addWidget(logo)
 
@@ -623,7 +628,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         event.ignore()
         self.hide()
-        self.tray.showMessage("RDC Dashboard", "Running in tray. Right-click to open.",
+        self.tray.showMessage("RDC Explorer", "Running in tray. Right-click to open.",
                               QSystemTrayIcon.MessageIcon.Information, 2000)
 
     def save_geometry(self):
@@ -639,7 +644,7 @@ def main():
     args = parser.parse_args()
 
     app = QApplication(sys.argv)
-    app.setApplicationName("RDC Dashboard")
+    app.setApplicationName("RDC Explorer")
     app.setStyleSheet(DARK_QSS)
     app.setQuitOnLastWindowClosed(False)
 

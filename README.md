@@ -1,6 +1,8 @@
-# RDC AI Dashboard
+# RDC Explorer
 
 Desktop application for managing RDC company files, versioning, AI training sync, and multi-model AI tools. Built with PyQt6 — runs on Windows, macOS, and Linux.
+
+> **Note:** The GitHub repo is still named `rdc-ai-dashboard` — a rename to `rdc-explorer` is recommended.
 
 ---
 
@@ -26,8 +28,8 @@ cd build
 build_windows.bat
 ```
 Outputs:
-- `dist\RDC_Dashboard.exe` — standalone binary
-- `dist\RDC_Dashboard_Setup_v1.0.0.exe` — Inno Setup wizard installer (if Inno Setup 6 is installed)
+- `dist\RDC_Explorer.exe` — standalone binary
+- `dist\RDC_Explorer_Setup_v2.0.0.exe` — Inno Setup wizard installer (if Inno Setup 6 is installed)
 
 Requires: Python 3.11+, [Inno Setup 6](https://jrsoftware.org/isinfo.php) (optional, for the wizard installer)
 
@@ -39,7 +41,7 @@ cd build
 bash build_mac.sh
 ```
 Outputs:
-- `dist/RDC_Dashboard_v1.0.0.dmg` — drag-to-Applications disk image
+- `dist/RDC_Explorer_v2.0.0.dmg` — drag-to-Applications disk image
 
 Requires: Python 3.11+, Xcode CLI tools (`xcode-select --install`)
 
@@ -51,8 +53,8 @@ cd build
 bash build_linux.sh
 ```
 Outputs:
-- `dist/RDC_Dashboard` — standalone ELF binary
-- `dist/RDC_Dashboard_Linux_v1.0.0.tar.gz` — distributable archive
+- `dist/RDC_Explorer` — standalone ELF binary
+- `dist/RDC_Explorer_Linux_v2.0.0.tar.gz` — distributable archive
 
 Requires: Python 3.10+, X11 or Wayland display server
 

@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # ============================================================
-#  RDC Dashboard — Linux Build
-#  Produces: dist/RDC_Dashboard          (standalone binary)
-#            dist/RDC_Dashboard.tar.gz   (distributable archive)
+#  RDC Explorer — Linux Build
+#  Produces: dist/RDC_Explorer          (standalone binary)
+#            dist/RDC_Explorer.tar.gz   (distributable archive)
 #  Run on Linux with Python 3.11+
 # ============================================================
 set -e
 echo ""
 echo "============================================================"
-echo "  RDC Dashboard  —  Linux Build"
-echo "  Produces: dist/RDC_Dashboard  +  dist/RDC_Dashboard.tar.gz"
+echo "  RDC Explorer  —  Linux Build"
+echo "  Produces: dist/RDC_Explorer  +  dist/RDC_Explorer.tar.gz"
 echo "============================================================"
 echo ""
 
@@ -66,16 +66,16 @@ echo "[OK] Icons generated."
 echo "[..] Running PyInstaller (2-3 min)..."
 cd "$PROJECT"
 pyinstaller --clean --noconfirm build/rdc_dashboard.spec
-echo "[OK] Built: dist/RDC_Dashboard"
+echo "[OK] Built: dist/RDC_Explorer"
 
 # ── Verify binary ────────────────────────────────────────────
-BINARY="$PROJECT/dist/RDC_Dashboard"
+BINARY="$PROJECT/dist/RDC_Explorer"
 if [ ! -f "$BINARY" ]; then
     # PyInstaller on Linux sometimes produces a directory bundle
-    BINARY_DIR="$PROJECT/dist/RDC_Dashboard"
+    BINARY_DIR="$PROJECT/dist/RDC_Explorer"
     if [ -d "$BINARY_DIR" ]; then
         echo "[OK] One-folder bundle found at: $BINARY_DIR"
-        BINARY="$BINARY_DIR/RDC_Dashboard"
+        BINARY="$BINARY_DIR/RDC_Explorer"
     fi
 fi
 [ -f "$BINARY" ] || { echo "[ERROR] Binary not found. Check PyInstaller output."; exit 1; }
@@ -87,29 +87,29 @@ chmod +x "$BINARY"
 # ── Write launcher shell script ──────────────────────────────
 LAUNCHER_DIR="$PROJECT/launchers"
 mkdir -p "$LAUNCHER_DIR"
-cat > "$LAUNCHER_DIR/launch_dashboard.sh" <<'LAUNCHER'
+cat > "$LAUNCHER_DIR/launch_explorer.sh" <<'LAUNCHER'
 #!/usr/bin/env bash
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-BINARY="$SCRIPT_DIR/../dist/RDC_Dashboard"
+BINARY="$SCRIPT_DIR/../dist/RDC_Explorer"
 if [ ! -f "$BINARY" ]; then
-    echo "[ERROR] RDC Dashboard binary not found at: $BINARY"
+    echo "[ERROR] RDC Explorer binary not found at: $BINARY"
     echo "Please run build/build_linux.sh first."
     exit 1
 fi
 exec "$BINARY" "$@"
 LAUNCHER
-chmod +x "$LAUNCHER_DIR/launch_dashboard.sh"
-echo "[OK] Launcher: $LAUNCHER_DIR/launch_dashboard.sh"
+chmod +x "$LAUNCHER_DIR/launch_explorer.sh"
+echo "[OK] Launcher: $LAUNCHER_DIR/launch_explorer.sh"
 
 # ── Write .desktop entry ─────────────────────────────────────
-DESKTOP_FILE="$PROJECT/launchers/RDC_Dashboard.desktop"
+DESKTOP_FILE="$PROJECT/launchers/RDC_Explorer.desktop"
 ICON_PATH="$PROJECT/assets/icon.png"
 cat > "$DESKTOP_FILE" <<DESKTOP
 [Desktop Entry]
 Version=1.0
 Type=Application
-Name=RDC Dashboard
-Comment=RDC AI Dashboard — file management and AI tools
+Name=RDC Explorer
+Comment=RDC Explorer — file management and AI tools
 Exec=$BINARY
 Icon=$ICON_PATH
 Terminal=false
@@ -127,14 +127,14 @@ fi
 
 # ── Create distributable tarball ─────────────────────────────
 echo "[..] Creating distributable archive..."
-DIST_NAME="RDC_Dashboard_Linux_v1.0.0"
+DIST_NAME="RDC_Explorer_Linux_v2.0.0"
 STAGING="$PROJECT/dist/${DIST_NAME}"
 rm -rf "$STAGING"
 mkdir -p "$STAGING"
 
 # Copy binary (or one-folder bundle)
-if [ -d "$PROJECT/dist/RDC_Dashboard" ] && [ "$(ls -A "$PROJECT/dist/RDC_Dashboard" 2>/dev/null | wc -l)" -gt 1 ]; then
-    cp -R "$PROJECT/dist/RDC_Dashboard" "$STAGING/"
+if [ -d "$PROJECT/dist/RDC_Explorer" ] && [ "$(ls -A "$PROJECT/dist/RDC_Explorer" 2>/dev/null | wc -l)" -gt 1 ]; then
+    cp -R "$PROJECT/dist/RDC_Explorer" "$STAGING/"
 else
     cp "$BINARY" "$STAGING/"
 fi
@@ -145,16 +145,16 @@ cp "$DESKTOP_FILE" "$STAGING/"
 
 # Write a quick-start README
 cat > "$STAGING/README.txt" <<'README'
-RDC AI Dashboard — Linux
-========================
+RDC Explorer — Linux
+====================
 
 Quick Start:
-  1. Copy this folder anywhere (e.g. ~/Applications/RDC_Dashboard/)
-  2. Run:  ./RDC_Dashboard
-     Or double-click RDC_Dashboard.desktop in your file manager.
+  1. Copy this folder anywhere (e.g. ~/Applications/RDC_Explorer/)
+  2. Run:  ./RDC_Explorer
+     Or double-click RDC_Explorer.desktop in your file manager.
 
 To add to your application menu:
-  xdg-desktop-menu install RDC_Dashboard.desktop
+  xdg-desktop-menu install RDC_Explorer.desktop
 
 Requirements:
   - 64-bit Linux (Ubuntu 20.04+ / Debian 11+ / Fedora 36+)
@@ -203,10 +203,10 @@ echo ""
 echo "============================================================"
 echo "  Build complete!"
 echo ""
-echo "  Standalone binary: dist/RDC_Dashboard"
+echo "  Standalone binary: dist/RDC_Explorer"
 echo "  Distributable:     dist/${DIST_NAME}.tar.gz"
 echo ""
-echo "  To run:            ./dist/RDC_Dashboard"
-echo "  To install menu:   xdg-desktop-menu install launchers/RDC_Dashboard.desktop"
+echo "  To run:            ./dist/RDC_Explorer"
+echo "  To install menu:   xdg-desktop-menu install launchers/RDC_Explorer.desktop"
 echo "============================================================"
 echo ""

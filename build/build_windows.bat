@@ -1,10 +1,10 @@
 @echo off
 setlocal EnableDelayedExpansion
-title RDC Dashboard — Windows Build
+title RDC Explorer — Windows Build
 echo.
 echo ============================================================
-echo   RDC Dashboard  —  Windows 11 Build
-echo   Produces: dist\RDC_Dashboard_Setup_v1.0.0.exe
+echo   RDC Explorer  —  Windows 11 Build
+echo   Produces: dist\RDC_Explorer_Setup_v2.0.0.exe
 echo ============================================================
 echo.
 
@@ -46,7 +46,7 @@ if errorlevel 1 (
     echo [ERROR] PyInstaller build failed.
     pause & exit /b 1
 )
-echo [OK] PyInstaller complete: dist\RDC_Dashboard.exe
+echo [OK] PyInstaller complete: dist\RDC_Explorer.exe
 
 :: ── Inno Setup ───────────────────────────────────────────────
 echo [..] Looking for Inno Setup...
@@ -56,7 +56,7 @@ if exist "C:\Program Files\Inno Setup 6\ISCC.exe"       set ISCC="C:\Program Fil
 
 if %ISCC%=="" (
     echo [WARN] Inno Setup not found. Skipping installer packaging.
-    echo        Standalone exe is at: dist\RDC_Dashboard.exe
+    echo        Standalone exe is at: dist\RDC_Explorer.exe
     echo        Download Inno Setup from https://jrsoftware.org/isinfo.php
     echo        Then re-run this script to produce the full Setup.exe
 ) else (
@@ -65,15 +65,15 @@ if %ISCC%=="" (
     if errorlevel 1 (
         echo [ERROR] Inno Setup failed.
     ) else (
-        echo [OK] Installer: dist\RDC_Dashboard_Setup_v1.0.0.exe
+        echo [OK] Installer: dist\RDC_Explorer_Setup_v2.0.0.exe
     )
 )
 
 echo.
 echo ============================================================
 echo   Build complete.
-echo   Standalone exe : dist\RDC_Dashboard.exe
-echo   Full installer : dist\RDC_Dashboard_Setup_v1.0.0.exe
+echo   Standalone exe : dist\RDC_Explorer.exe
+echo   Full installer : dist\RDC_Explorer_Setup_v2.0.0.exe
 echo ============================================================
 echo.
 pause

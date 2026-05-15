@@ -1,14 +1,14 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    RDC Dashboard Installer
+    RDC Explorer Installer
 .DESCRIPTION
-    Downloads and installs RDC Dashboard with Desktop and Start Menu shortcuts.
+    Downloads and installs RDC Explorer with Desktop and Start Menu shortcuts.
     Run by right-clicking and selecting "Run with PowerShell".
 #>
 
 $ErrorActionPreference = "Stop"
-$Host.UI.RawUI.WindowTitle = "RDC Dashboard Installer"
+$Host.UI.RawUI.WindowTitle = "RDC Explorer Installer"
 
 function Write-Step  { Write-Host " [..] $args" -ForegroundColor Cyan }
 function Write-OK    { Write-Host " [OK] $args" -ForegroundColor Green }
@@ -18,26 +18,26 @@ function Write-Warn  { Write-Host " [WARN] $args" -ForegroundColor Yellow }
 Clear-Host
 Write-Host ""
 Write-Host " ============================================================" -ForegroundColor DarkCyan
-Write-Host "   RDC Dashboard Installer" -ForegroundColor White
+Write-Host "   RDC Explorer Installer" -ForegroundColor White
 Write-Host "   Regenerative Development Corp" -ForegroundColor Gray
 Write-Host " ============================================================" -ForegroundColor DarkCyan
 Write-Host ""
-Write-Host " This will install RDC Dashboard to your computer." -ForegroundColor White
+Write-Host " This will install RDC Explorer to your computer." -ForegroundColor White
 Write-Host " No Git or technical setup required." -ForegroundColor Gray
 Write-Host ""
 Read-Host " Press Enter to begin"
 
 # ── Paths ─────────────────────────────────────────────────────
-$InstallDir = "$env:LOCALAPPDATA\RDC_Dashboard"
-$TempDir    = "$env:TEMP\RDC_Dashboard_Install"
+$InstallDir = "$env:LOCALAPPDATA\RDC_Explorer"
+$TempDir    = "$env:TEMP\RDC_Explorer_Install"
 $RepoZip    = "$TempDir\repo.zip"
 $RepoUrl    = "https://github.com/LIFEAI/rdc-ai-dashboard/archive/refs/heads/main.zip"
 $VenvDir    = "$InstallDir\venv"
 $PythonW    = "$VenvDir\Scripts\pythonw.exe"
 $PipExe     = "$VenvDir\Scripts\pip.exe"
-$Launcher   = "$InstallDir\RDC_Dashboard.bat"
+$Launcher   = "$InstallDir\RDC_Explorer.bat"
 $IconPath   = "$InstallDir\assets\icon.ico"
-$StartDir   = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\RDC Dashboard"
+$StartDir   = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\RDC Explorer"
 $Desktop    = [Environment]::GetFolderPath("Desktop")
 
 Write-Step "Install location: $InstallDir"
@@ -71,7 +71,7 @@ New-Item -ItemType Directory -Force $TempDir | Out-Null
 New-Item -ItemType Directory -Force $InstallDir | Out-Null
 
 # ── Download ──────────────────────────────────────────────────
-Write-Step "Downloading RDC Dashboard from GitHub..."
+Write-Step "Downloading RDC Explorer from GitHub..."
 try {
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     Invoke-WebRequest -Uri $RepoUrl -OutFile $RepoZip -UseBasicParsing
@@ -124,11 +124,11 @@ Set-Content -Path $Launcher -Value $LauncherContent -Encoding ASCII
 # ── Desktop shortcut ──────────────────────────────────────────
 Write-Step "Creating Desktop shortcut..."
 $WS = New-Object -ComObject WScript.Shell
-$Shortcut = $WS.CreateShortcut("$Desktop\RDC Dashboard.lnk")
+$Shortcut = $WS.CreateShortcut("$Desktop\RDC Explorer.lnk")
 $Shortcut.TargetPath      = $Launcher
 $Shortcut.WorkingDirectory = $InstallDir
 $Shortcut.IconLocation    = $IconPath
-$Shortcut.Description     = "RDC AI Dashboard"
+$Shortcut.Description     = "RDC Explorer"
 $Shortcut.Save()
 Write-OK "Desktop shortcut created."
 
@@ -136,24 +136,24 @@ Write-OK "Desktop shortcut created."
 Write-Step "Creating Start Menu entry..."
 New-Item -ItemType Directory -Force $StartDir | Out-Null
 
-$SM = $WS.CreateShortcut("$StartDir\RDC Dashboard.lnk")
+$SM = $WS.CreateShortcut("$StartDir\RDC Explorer.lnk")
 $SM.TargetPath       = $Launcher
 $SM.WorkingDirectory = $InstallDir
 $SM.IconLocation     = $IconPath
-$SM.Description      = "RDC AI Dashboard"
+$SM.Description      = "RDC Explorer"
 $SM.Save()
 
 # Uninstaller
 $UninstallScript = @"
 @echo off
-echo Uninstalling RDC Dashboard...
+echo Uninstalling RDC Explorer...
 rmdir /s /q "$InstallDir"
-del /f /q "$Desktop\RDC Dashboard.lnk"
+del /f /q "$Desktop\RDC Explorer.lnk"
 rmdir /s /q "$StartDir"
 echo Done.
 pause
 "@
-Set-Content -Path "$StartDir\Uninstall RDC Dashboard.bat" -Value $UninstallScript -Encoding ASCII
+Set-Content -Path "$StartDir\Uninstall RDC Explorer.bat" -Value $UninstallScript -Encoding ASCII
 Write-OK "Start Menu entry created."
 
 # ── Cleanup ───────────────────────────────────────────────────
@@ -164,12 +164,12 @@ Write-Host ""
 Write-Host " ============================================================" -ForegroundColor DarkCyan
 Write-Host "   Installation complete!" -ForegroundColor Green
 Write-Host ""
-Write-Host "   RDC Dashboard is installed." -ForegroundColor White
+Write-Host "   RDC Explorer is installed." -ForegroundColor White
 Write-Host "   Launch it from your Desktop or Start Menu." -ForegroundColor White
 Write-Host " ============================================================" -ForegroundColor DarkCyan
 Write-Host ""
 
-$Launch = Read-Host " Launch RDC Dashboard now? (Y/N)"
+$Launch = Read-Host " Launch RDC Explorer now? (Y/N)"
 if ($Launch -match "^[Yy]") {
     Start-Process "cmd.exe" -ArgumentList "/c `"$Launcher`"" -WorkingDirectory $InstallDir
 }
