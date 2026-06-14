@@ -66,6 +66,28 @@ class WorkerSignals(QObject):
 
 
 # ── Drag-drop file list ──────────────────────────────────────────────────────
+def paths_from_mime_data(mime_data) -> list[str]:
+    paths: list[str] = []
+    if mime_data.hasUrls():
+        paths.extend(u.toLocalFile() for u in mime_data.urls() if u.toLocalFile())
+
+    model_data = "application/x-qabstractitemmodeldatalist"
+    if mime_data.hasFormat(model_data):
+        text = mime_data.text()
+        if text:
+            paths.extend(line.strip() for line in text.splitlines() if line.strip())
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for path in paths:
+        path = os.path.normpath(path)
+        normalized = os.path.normcase(os.path.abspath(path))
+        if normalized not in seen and os.path.exists(path):
+            seen.add(normalized)
+            deduped.append(path)
+    return deduped
+
+
 class DropFileList(QListWidget):
     files_dropped = pyqtSignal(list)
 
@@ -75,19 +97,111 @@ class DropFileList(QListWidget):
         self.setDragDropMode(QAbstractItemView.DragDropMode.DropOnly)
 
     def dragEnterEvent(self, e):
-        if e.mimeData().hasUrls():
+        if paths_from_mime_data(e.mimeData()):
             e.acceptProposedAction()
+        else:
+            super().dragEnterEvent(e)
 
     def dragMoveEvent(self, e):
-        if e.mimeData().hasUrls():
+        if paths_from_mime_data(e.mimeData()):
             e.acceptProposedAction()
+        else:
+            super().dragMoveEvent(e)
 
     def dropEvent(self, e):
-        paths = [u.toLocalFile() for u in e.mimeData().urls()]
+        paths = paths_from_mime_data(e.mimeData())
+        if not paths:
+            super().dropEvent(e)
+            return
         self.files_dropped.emit(paths)
         for p in paths:
             self.addItem(p)
-            mru.add_file(p)
+            if os.path.isdir(p):
+                mru.add_folder(p)
+            else:
+                mru.add_file(p)
+        e.acceptProposedAction()
+
+
+def file_type_label(path: str) -> str:
+    ext = Path(path).suffix.lower().lstrip(".")
+    if not ext:
+        return "Other"
+    if ext in {"doc", "docx", "odt", "rtf", "txt", "pdf"}:
+        return "Docs"
+    if ext in {"ppt", "pptx", "odp", "key"}:
+        return "Slides"
+    if ext in {"md", "markdown", "mdx"}:
+        return "Markdown"
+    if ext in {"xls", "xlsx", "csv", "tsv"}:
+        return "Sheets"
+    if ext in {"png", "jpg", "jpeg", "gif", "webp", "svg"}:
+        return "Images"
+    return ext.upper()
+
+
+def grouped_files_by_type(paths: list[str]) -> dict[str, list[str]]:
+    grouped: dict[str, list[str]] = {}
+    for path in paths:
+        grouped.setdefault(file_type_label(path), []).append(path)
+    return {
+        label: sorted(items, key=lambda p: os.path.basename(p).lower())
+        for label, items in sorted(grouped.items(), key=lambda item: item[0].lower())
+    }
+
+
+def find_first_path(root: str, query: str, max_entries: int = 5000) -> str | None:
+    """Return the first file/folder under root whose name contains query."""
+    needle = query.strip().lower()
+    if not needle or not root or not os.path.isdir(root):
+        return None
+
+    root_name = os.path.basename(os.path.normpath(root)).lower()
+    if needle in root_name:
+        return root
+
+    visited = 0
+    for dirpath, dirnames, filenames in os.walk(root, onerror=lambda _err: None):
+        visited += len(dirnames) + len(filenames)
+        if visited > max_entries:
+            return None
+        dirnames[:] = sorted(
+            [d for d in dirnames if d not in {"$RECYCLE.BIN", "System Volume Information"}],
+            key=str.lower,
+        )
+        for name in dirnames + sorted(filenames, key=str.lower):
+            if needle in name.lower():
+                return os.path.join(dirpath, name)
+    return None
+
+
+class SearchLineEdit(QLineEdit):
+    dismissed = pyqtSignal()
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            self.clear()
+            self.hide()
+            self.dismissed.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+
+class SearchableTreeView(QTreeView):
+    search_typed = pyqtSignal(str)
+
+    def keyPressEvent(self, event):
+        text = event.text()
+        if text and text.isprintable() and not event.modifiers() & (
+            Qt.KeyboardModifier.ControlModifier
+            | Qt.KeyboardModifier.AltModifier
+            | Qt.KeyboardModifier.MetaModifier
+        ):
+            self.search_typed.emit(text)
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
 
 # ── File Panel ───────────────────────────────────────────────────────────────
@@ -97,15 +211,50 @@ class FilePanel(QWidget):
         self.settings = settings
         layout = QHBoxLayout(self)
 
-        # Left: folder tree
+        # Left: pinned file manager
+        pins = QWidget()
+        pv = QVBoxLayout(pins)
+        pv.setContentsMargins(0,0,8,0)
+
+        pin_title = QLabel("Pinned"); pin_title.setObjectName("section_title")
+        pv.addWidget(pin_title)
+
+        drop_label = QLabel("Drop Files or Folders to Pin"); drop_label.setObjectName("section_title")
+        pv.addWidget(drop_label)
+        self.drop_list = DropFileList()
+        self.drop_list.setMinimumHeight(90)
+        self.drop_list.files_dropped.connect(self._pin_paths)
+        self.drop_list.itemDoubleClicked.connect(self._open_path_item)
+        pv.addWidget(self.drop_list)
+
+        folder_label = QLabel("Folders"); folder_label.setObjectName("section_title")
+        pv.addWidget(folder_label)
+        self.pinned_folders = QListWidget()
+        self.pinned_folders.setMaximumHeight(140)
+        self.pinned_folders.itemDoubleClicked.connect(self._open_path_item)
+        pv.addWidget(self.pinned_folders)
+
+        files_label = QLabel("Files by Type"); files_label.setObjectName("section_title")
+        pv.addWidget(files_label)
+        self.pinned_files = QListWidget()
+        self.pinned_files.itemDoubleClicked.connect(self._open_path_item)
+        pv.addWidget(self.pinned_files)
+
+        # Right: folder tree
         left = QWidget()
         lv = QVBoxLayout(left)
         lv.setContentsMargins(0,0,0,0)
         lbl = QLabel("Folder Tree"); lbl.setObjectName("section_title")
         lv.addWidget(lbl)
+        self.search_edit = SearchLineEdit()
+        self.search_edit.setPlaceholderText("Search this tree...")
+        self.search_edit.textChanged.connect(self._search_tree)
+        self.search_edit.dismissed.connect(lambda: self.tree.setFocus())
+        self.search_edit.hide()
+        lv.addWidget(self.search_edit)
         self.model = QFileSystemModel()
         self.model.setRootPath(QDir.rootPath())
-        self.tree = QTreeView()
+        self.tree = SearchableTreeView()
         self.tree.setModel(self.model)
         self.tree.setDragEnabled(True)
         self.tree.hideColumn(1); self.tree.hideColumn(2); self.tree.hideColumn(3)
@@ -114,41 +263,24 @@ class FilePanel(QWidget):
             idx = self.model.index(root)
             self.tree.setRootIndex(idx)
         self.tree.doubleClicked.connect(self._open_file)
+        self.tree.search_typed.connect(self._append_tree_search)
         lv.addWidget(self.tree)
 
         btn_open = QPushButton("📂  Open in Explorer")
         btn_open.clicked.connect(self._open_explorer)
         lv.addWidget(btn_open)
 
-        # Right: drop zone + MRU
-        right = QWidget()
-        rv = QVBoxLayout(right)
-        rv.setContentsMargins(0,0,0,0)
-
-        lbl2 = QLabel("Drop Files Here"); lbl2.setObjectName("section_title")
-        rv.addWidget(lbl2)
-        self.drop_list = DropFileList()
-        self.drop_list.setMinimumHeight(120)
-        rv.addWidget(self.drop_list)
-
-        lbl3 = QLabel("Recent Files"); lbl3.setObjectName("section_title")
-        rv.addWidget(lbl3)
-        self.recent_files = QListWidget()
-        self._refresh_mru()
-        self.recent_files.itemDoubleClicked.connect(self._open_recent)
-        rv.addWidget(self.recent_files)
-
         splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.addWidget(pins)
         splitter.addWidget(left)
-        splitter.addWidget(right)
-        splitter.setSizes([600, 400])
+        splitter.setSizes([330, 700])
         layout.addWidget(splitter)
+        self._refresh_pins()
 
     def _open_file(self, idx: QModelIndex):
         path = self.model.filePath(idx)
         if os.path.isfile(path):
             mru.add_file(path)
-            self._refresh_mru()
             if sys.platform == "win32":
                 os.startfile(path)
             elif sys.platform == "darwin":
@@ -165,18 +297,80 @@ class FilePanel(QWidget):
             elif sys.platform == "darwin":
                 os.system(f'open "{root}"')
 
-    def _open_recent(self, item: QListWidgetItem):
-        path = item.text()
+    def _append_tree_search(self, text: str):
+        if not self.search_edit.isVisible():
+            self.search_edit.show()
+        self.search_edit.setFocus()
+        self.search_edit.setText(self.search_edit.text() + text)
+        self.search_edit.setCursorPosition(len(self.search_edit.text()))
+
+    def _tree_root_path(self) -> str:
+        root_idx = self.tree.rootIndex()
+        root = self.model.filePath(root_idx)
+        if root and os.path.isdir(root):
+            return root
+        return self.settings.get("rdc2_root", "") or QDir.rootPath()
+
+    def _search_tree(self, query: str):
+        if not query.strip():
+            return
+        match = find_first_path(self._tree_root_path(), query)
+        if not match:
+            return
+        idx = self.model.index(match)
+        if not idx.isValid():
+            return
+        parent = idx.parent()
+        while parent.isValid():
+            self.tree.expand(parent)
+            parent = parent.parent()
+        self.tree.setCurrentIndex(idx)
+        self.tree.scrollTo(idx, QAbstractItemView.ScrollHint.PositionAtCenter)
+
+    def _pin_paths(self, paths: list[str]):
+        for path in paths:
+            if os.path.isdir(path):
+                mru.pin_folder(path)
+            elif os.path.isfile(path):
+                mru.pin_file(path)
+        self._refresh_pins()
+
+    def _add_path_item(self, widget: QListWidget, path: str):
+        item = QListWidgetItem(os.path.basename(path) or path)
+        item.setToolTip(path)
+        item.setData(Qt.ItemDataRole.UserRole, path)
+        widget.addItem(item)
+
+    def _add_group_header(self, widget: QListWidget, label: str):
+        item = QListWidgetItem(label)
+        item.setFlags(Qt.ItemFlag.NoItemFlags)
+        font = item.font()
+        font.setBold(True)
+        item.setFont(font)
+        widget.addItem(item)
+
+    def _refresh_pins(self):
+        self.pinned_folders.clear()
+        for folder in mru.get_pinned_folders():
+            if os.path.exists(folder):
+                self._add_path_item(self.pinned_folders, folder)
+
+        self.pinned_files.clear()
+        for label, files in grouped_files_by_type(mru.get_pinned_files()).items():
+            existing = [path for path in files if os.path.exists(path)]
+            if not existing:
+                continue
+            self._add_group_header(self.pinned_files, label)
+            for path in existing:
+                self._add_path_item(self.pinned_files, path)
+
+    def _open_path_item(self, item: QListWidgetItem):
+        path = item.data(Qt.ItemDataRole.UserRole) or item.text()
         if os.path.exists(path):
             if sys.platform == "win32":
                 os.startfile(path)
             elif sys.platform == "darwin":
                 os.system(f'open "{path}"')
-
-    def _refresh_mru(self):
-        self.recent_files.clear()
-        for f in mru.get_recent_files():
-            self.recent_files.addItem(f)
 
 
 # ── Archive Panel ─────────────────────────────────────────────────────────────
