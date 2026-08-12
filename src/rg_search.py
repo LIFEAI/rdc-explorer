@@ -6,9 +6,13 @@ import re
 import shutil
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 DOCUMENT_SUFFIXES = {".pdf", ".docx", ".pptx"}
+CODE_PATTERNS = ("*.ts", "*.tsx", "*.js", "*.jsx", "*.mjs", "*.cjs", "*.py", "*.ps1", "*.psm1", "*.psd1", "*.sql", "*.html", "*.css", "*.scss", "*.xml")
+DOC_PATTERNS = ("*.md", "*.mdx", "*.txt", "*.pdf", "*.docx", "*.pptx")
 
 
 def locate_rg(config: dict) -> str | None:
@@ -44,6 +48,68 @@ def _text_patterns(profile: dict) -> list[str]:
     return [pattern for pattern in profile.get("include", []) if pattern not in _document_patterns(profile)]
 
 
+def parse_query(query: str) -> list[str]:
+    """Tokenize quoted phrases and reserved and/or/not operators for source search."""
+    tokens = re.findall(r'"([^"\\]*(?:\\.[^"\\]*)*)"|(\S+)', query)
+    return [quoted.replace('\\"', '"') if quoted else bare for quoted, bare in tokens]
+
+
+def _query_postfix(query: str) -> list[str]:
+    tokens = parse_query(query)
+    if not tokens:
+        raise ValueError("Enter a source-search phrase")
+    precedence = {"or": 1, "and": 2, "not": 3}
+    output, operators = [], []
+    expecting_term = True
+    for token in tokens:
+        operator = token.casefold()
+        if operator in precedence:
+            if operator == "not":
+                if not expecting_term:
+                    operators.append("and")
+                operators.append(operator)
+                expecting_term = True
+                continue
+            if expecting_term:
+                raise ValueError(f"Expected a search term before '{token}'")
+            while operators and precedence[operators[-1]] >= precedence[operator]:
+                output.append(operators.pop())
+            operators.append(operator)
+            expecting_term = True
+        else:
+            if not expecting_term:
+                operators.append("and")
+            output.append(token)
+            expecting_term = False
+    if expecting_term:
+        raise ValueError("A source-search operator needs a term after it")
+    while operators:
+        output.append(operators.pop())
+    return output
+
+
+def query_terms(query: str) -> list[str]:
+    return [token for token in _query_postfix(query) if token not in {"and", "or", "not"}]
+
+
+def matches_query(text: str, query: str, options: dict) -> bool:
+    postfix = _query_postfix(query)
+    flags = re.I if options.get("case_insensitive", True) else 0
+    stack = []
+    for token in postfix:
+        if token == "not":
+            stack.append(not stack.pop())
+        elif token in {"and", "or"}:
+            right, left = stack.pop(), stack.pop()
+            stack.append(left and right if token == "and" else left or right)
+        else:
+            expression = token if options.get("regex") else re.escape(token)
+            if options.get("whole_word"):
+                expression = rf"\b(?:{expression})\b"
+            stack.append(bool(re.search(expression, text, flags)))
+    return bool(stack and stack[-1])
+
+
 def build_command(query: str, profile: dict, config: dict) -> list[str]:
     """Build the exact ripgrep command for text-capable file masks only."""
     rg = locate_rg(config)
@@ -54,7 +120,8 @@ def build_command(query: str, profile: dict, config: dict) -> list[str]:
     command = [rg, "--json", "--line-number", "--column", "--color", "never"]
     command += ["--max-count", str(options.get("max_matches_per_file", 100))]
     command += ["--max-filesize", str(options.get("max_file_size", "10M"))]
-    if not options.get("regex", False):
+    terms = query_terms(query)
+    if not options.get("regex", False) and terms:
         command.append("--fixed-strings")
     if options.get("case_insensitive", True):
         command.append("--ignore-case")
@@ -74,7 +141,12 @@ def build_command(query: str, profile: dict, config: dict) -> list[str]:
         command += ["--glob", pattern]
     for pattern in profile.get("exclude", []):
         command += ["--glob", f"!{pattern}"]
-    command += [query, *profile.get("roots", [])]
+    if terms:
+        for term in terms:
+            command += ["-e", term]
+    else:
+        command += ["-e", "."]
+    command += profile.get("roots", [])
     return command
 
 
@@ -97,9 +169,14 @@ def _search_text(query: str, profile: dict, config: dict, cancel_event=None):
             if event.get("type") != "match":
                 continue
             data = event["data"]
+            text = data["lines"]["text"].rstrip("\r\n")
+            if not matches_query(text, query, profile.get("options", {})):
+                continue
+            if profile.get("frontmatter_only") and not _is_frontmatter_line(Path(data["path"]["text"]), data["line_number"]):
+                continue
             yield {
                 "path": data["path"]["text"], "line": data["line_number"],
-                "text": data["lines"]["text"].rstrip("\r\n"),
+                "text": text,
                 "column": data.get("submatches", [{}])[0].get("start", 0) + 1,
             }
         stderr = process.stderr.read().strip()
@@ -211,9 +288,23 @@ def _query_pattern(query: str, options: dict):
     return re.compile(expression, re.I if options.get("case_insensitive", True) else 0)
 
 
+def _is_frontmatter_line(path: Path, line_number: int) -> bool:
+    if path.suffix.lower() not in {".md", ".mdx"}:
+        return False
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        if not lines or lines[0].strip() != "---":
+            return False
+        for end in range(1, len(lines)):
+            if lines[end].strip() == "---":
+                return 1 < line_number <= end
+    except OSError:
+        return False
+    return False
+
+
 def _search_documents(query: str, profile: dict, cancel_event=None):
     options = profile.get("options", {})
-    pattern = _query_pattern(query, options)
     per_file = int(options.get("max_matches_per_file", 100))
     for path in _document_files(profile):
         if cancel_event and cancel_event.is_set():
@@ -227,9 +318,9 @@ def _search_documents(query: str, profile: dict, cancel_event=None):
                 for index, line in enumerate(lines, 1):
                     if cancel_event and cancel_event.is_set():
                         return
-                    found = pattern.search(line)
-                    if not found:
+                    if not matches_query(line, query, options):
                         continue
+                    found = re.search(query_terms(query)[0] if options.get("regex") else re.escape(query_terms(query)[0]), line, re.I if options.get("case_insensitive", True) else 0)
                     start, end = max(0, index - 3), min(len(lines), index + 2)
                     preview = "\n".join(
                         f"{line_number + 1:>6}  {'>' if line_number + 1 == index else ' '} {lines[line_number]}"
@@ -260,3 +351,29 @@ def search(query: str, profile: dict, config: dict, cancel_event=None):
             remaining -= 1
             if remaining <= 0:
                 return
+
+
+def search_codeflow(query: str, config: dict, cancel_event=None):
+    """Search the live CodeFlow symbol graph, never the local disk."""
+    base = config.get("codeflow_url") or os.environ.get("CODEFLOW_URL") or "http://127.0.0.1:3109"
+    terms = query_terms(query)
+    body = json.dumps({"query": " ".join(terms), "limit": 500}).encode("utf-8")
+    request = urllib.request.Request(
+        base.rstrip("/") + "/api/codeflow/symbols/search", data=body,
+        headers={"Content-Type": "application/json"}, method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=12) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"CodeFlow is unavailable at {base}: {exc.reason}") from exc
+    for symbol in payload.get("symbols", []):
+        if cancel_event and cancel_event.is_set():
+            return
+        if not matches_query(symbol.get("name") or "", query, {"case_insensitive": True}):
+            continue
+        path = symbol.get("file_path") or "(CodeFlow symbol without a file path)"
+        line = symbol.get("start_line") or 1
+        location = f"{symbol.get('kind') or 'symbol'} • {symbol.get('language') or 'unknown'} • line {line}"
+        yield {"path": path, "line": line, "column": 1, "text": symbol.get("name") or "(unnamed symbol)", "location": location,
+               "preview": json.dumps(symbol, indent=2, ensure_ascii=False), "codeflow": True}

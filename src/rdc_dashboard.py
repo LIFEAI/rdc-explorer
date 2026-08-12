@@ -13,6 +13,8 @@ import json
 import argparse
 import traceback
 import faulthandler
+import copy
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -263,11 +265,11 @@ class SearchPanel(QWidget):
 
         search_page = QWidget()
         layout = QVBoxLayout(search_page)
-        title = QLabel("Portable Source Search"); title.setObjectName("section_title")
+        title = QLabel("Source Search"); title.setObjectName("section_title")
         layout.addWidget(title)
 
         query_row = QHBoxLayout()
-        self.query = QLineEdit(); self.query.setPlaceholderText("Find text or regular expression…")
+        self.query = QLineEdit(); self.query.setPlaceholderText('"exact phrase" and symbol or not deprecated')
         self.query.returnPressed.connect(self.submit_search)
         query_row.addWidget(self.query)
         self.search_button = QPushButton("▶ Search")
@@ -302,16 +304,16 @@ class SearchPanel(QWidget):
         options.addStretch()
         layout.addLayout(options)
 
-        file_types = QHBoxLayout()
-        file_types.addWidget(QLabel("File types:"))
-        self.file_types = QLineEdit()
-        self.file_types.setPlaceholderText("*.md, *.py, *.pdf  (comma-separated; blank = profile defaults)")
-        self.file_types.editingFinished.connect(self._save_visible_options)
-        file_types.addWidget(self.file_types, 1)
-        markdown_only = QPushButton("Markdown only")
-        markdown_only.clicked.connect(lambda: self.set_file_types("*.md, *.mdx"))
-        file_types.addWidget(markdown_only)
-        layout.addLayout(file_types)
+        source_scope = QHBoxLayout()
+        source_scope.addWidget(QLabel("IN"))
+        self.search_scope = QLineEdit()
+        self.search_scope.setPlaceholderText("code, docs, *.md, frontmatter, or cf  (space/comma separated; blank = profile defaults)")
+        self.search_scope.returnPressed.connect(self.submit_search)
+        source_scope.addWidget(self.search_scope, 1)
+        scope_help = QLabel("Groups: code  docs  fm/frontmatter  cf (CodeFlow)")
+        scope_help.setStyleSheet("color:#b7c2d0;")
+        source_scope.addWidget(scope_help)
+        layout.addLayout(source_scope)
 
         tuning = QHBoxLayout()
         tuning.addWidget(QLabel("Max depth (0 = unlimited):"))
@@ -414,14 +416,35 @@ class SearchPanel(QWidget):
             control.blockSignals(False)
         self._save_visible_options()
 
-    def set_file_types(self, patterns):
-        """Public controller seam for the visible comma-separated include filter."""
-        values = [value.strip() for value in str(patterns).split(",") if value.strip()]
-        if not values:
-            raise ValueError("Enter at least one file type, for example *.md")
-        self.file_types.setText(", ".join(values))
-        self._save_visible_options()
-        return values
+    def set_search_scope(self, scope):
+        """Public controller seam for `IN code/docs/*.ext/frontmatter/cf`."""
+        self.search_scope.setText(str(scope))
+        return self.search_scope.text()
+
+    def _scoped_profile(self, profile):
+        scoped = copy.deepcopy(profile)
+        raw = self.search_scope.text().strip()
+        if not raw:
+            return scoped, "disk"
+        scopes = [part.casefold() for part in re.split(r"[\s,]+", raw) if part]
+        if "cf" in scopes:
+            if len(scopes) != 1:
+                raise ValueError("Use IN cf by itself; CodeFlow does not search disk extensions.")
+            return scoped, "codeflow"
+        patterns, frontmatter = [], False
+        for scope in scopes:
+            if scope == "code":
+                patterns.extend(rg_search.CODE_PATTERNS)
+            elif scope == "docs":
+                patterns.extend(rg_search.DOC_PATTERNS)
+            elif scope in {"fm", "frontmatter"}:
+                patterns.extend(("*.md", "*.mdx")); frontmatter = True
+            else:
+                normalized = scope if scope.startswith("*.") else f"*.{scope.lstrip('.')}"
+                patterns.append(normalized)
+        scoped["include"] = list(dict.fromkeys(patterns))
+        scoped["frontmatter_only"] = frontmatter
+        return scoped, "disk"
 
     def set_pinned(self, pinned):
         profile = self._profile()
@@ -519,7 +542,6 @@ class SearchPanel(QWidget):
                    (self.follow, "follow_symlinks"), (self.no_ignore, "no_ignore"))
         for widget, key in widgets:
             widget.blockSignals(True); widget.setChecked(bool(options.get(key, False))); widget.blockSignals(False)
-        self.file_types.blockSignals(True); self.file_types.setText(", ".join(profile.get("include", []))); self.file_types.blockSignals(False)
         for widget, key in ((self.max_depth, "max_depth"), (self.threads, "threads"), (self.max_matches, "max_matches_per_file"), (self.max_total_results, "max_total_results")):
             default = 5000 if key == "max_total_results" else (100 if key == "max_matches_per_file" else 0)
             widget.blockSignals(True); widget.setValue(int(options.get(key, default))); widget.blockSignals(False)
@@ -545,9 +567,6 @@ class SearchPanel(QWidget):
                               "max_depth": self.max_depth.value(), "threads": self.threads.value(),
                               "max_matches_per_file": self.max_matches.value(), "max_total_results": self.max_total_results.value(),
                               "max_file_size": profile.get("options", {}).get("max_file_size", "10M")}
-        typed_patterns = [value.strip() for value in self.file_types.text().split(",") if value.strip()]
-        if typed_patterns:
-            profile["include"] = typed_patterns
         mru.save_search_config(self.config)
         self.config_editor.setPlainText(json.dumps(self.config, indent=2, ensure_ascii=False))
 
@@ -563,6 +582,12 @@ class SearchPanel(QWidget):
             self._set_status("Enter search text and select a profile.")
             return
         self._save_visible_options()
+        try:
+            profile, source = self._scoped_profile(profile)
+            rg_search.query_terms(query)
+        except ValueError as exc:
+            self._set_status(f"Search syntax: {exc}")
+            return
         if self.cancel_event:
             self.cancel_event.set()
         self.search_generation += 1
@@ -573,8 +598,8 @@ class SearchPanel(QWidget):
         self.directory_items = {}
         self.file_items = {}
         self.cancel_event = threading.Event()
-        self._set_status("Searching selected roots…")
-        threading.Thread(target=self._search_worker, args=(generation, query, profile.copy(), self.config.copy(), self.cancel_event), daemon=True).start()
+        self._set_status("Searching CodeFlow symbols…" if source == "codeflow" else "Searching selected roots…")
+        threading.Thread(target=self._search_worker, args=(generation, query, profile, self.config.copy(), self.cancel_event, source), daemon=True).start()
 
     def cancel_search(self):
         if self.cancel_event:
@@ -582,10 +607,11 @@ class SearchPanel(QWidget):
             self.cancel_button.setEnabled(False)
             self._set_status("Cancelling search…")
 
-    def _search_worker(self, generation, query, profile, config, cancel_event):
+    def _search_worker(self, generation, query, profile, config, cancel_event, source="disk"):
         try:
             batch = []
-            for match in rg_search.search(query, profile, config, cancel_event):
+            iterator = rg_search.search_codeflow(query, config, cancel_event) if source == "codeflow" else rg_search.search(query, profile, config, cancel_event)
+            for match in iterator:
                 batch.append(match)
                 if len(batch) >= 100:
                     self.signals.result.emit((generation, batch))
@@ -605,9 +631,11 @@ class SearchPanel(QWidget):
             self._add_result(match)
 
     @staticmethod
-    def compact_path(path, max_parts=3):
-        parts = Path(path).parts
-        return str(Path(*parts[-max_parts:])) if len(parts) > max_parts else str(path)
+    def compact_path(path, start_chars=15, end_chars=25):
+        value = str(path)
+        if len(value) <= start_chars + end_chars + 5:
+            return value
+        return f"{value[:start_chars]} … {value[-end_chars:]}"
 
     def _add_result(self, match):
         self.match_count += 1

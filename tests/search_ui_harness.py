@@ -19,7 +19,7 @@ import time
 import traceback
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 if hasattr(sys.stdout, "reconfigure"):
@@ -328,11 +328,43 @@ class PortableSearchHarness(unittest.TestCase):
         self.assertEqual(before, self.panel.match_count)
         self.assertEqual(before, len(self.panel.result_matches))
 
-    def test_32_visible_file_type_filter_supports_string_in_markdown(self):
-        self.assertEqual(["*.md"], self.panel.set_file_types("*.md"))
+    def test_32_in_scope_supports_string_in_markdown(self):
+        self.panel.set_search_scope("*.md")
         matches = self.search("needle")
         self.assertTrue(matches)
         self.assertTrue(all(Path(match["path"]).suffix == ".md" for match in matches))
+
+    def test_34_query_grammar_supports_quoted_and_or_not(self):
+        self.assertTrue(rg_search.matches_query("Needle appears here", '"Needle appears" and not lower', self.panel._profile()["options"]))
+        self.assertTrue(rg_search.matches_query("needle lower", 'missing or "needle lower"', self.panel._profile()["options"]))
+        self.assertFalse(rg_search.matches_query("needle lower", 'needle and not lower', self.panel._profile()["options"]))
+
+    def test_35_in_frontmatter_limits_markdown_to_frontmatter(self):
+        (self.root / "frontmatter.md").write_text("---\ntitle: needle metadata\n---\nneedle body\n", encoding="utf-8")
+        self.panel.set_search_scope("frontmatter")
+        matches = self.search("needle")
+        self.assertTrue(any("needle metadata" in match["text"] for match in matches))
+        self.assertFalse(any("needle body" in match["text"] for match in matches))
+
+    def test_36_directory_label_shows_start_and_end_with_ellipsis(self):
+        original = r"C:\\very-long-directory-name\\deep\\nested\\another-long-directory-name"
+        label = self.panel.compact_path(original)
+        self.assertTrue(label.startswith(original[:15]))
+        self.assertIn(" … ", label)
+        self.assertTrue(label.endswith(original[-25:]))
+
+    def test_37_in_cf_uses_codeflow_symbols_route_not_disk(self):
+        response = MagicMock()
+        response.read.return_value = json.dumps({"symbols": [{
+            "name": "needleSymbol", "file_path": "apps/test.ts", "start_line": 42,
+            "kind": "function", "language": "typescript",
+        }]}).encode("utf-8")
+        with patch("rg_search.urllib.request.urlopen") as urlopen:
+            urlopen.return_value.__enter__.return_value = response
+            matches = list(rg_search.search_codeflow("needle", {"codeflow_url": "http://codeflow.test"}))
+        self.assertEqual("apps/test.ts", matches[0]["path"])
+        self.assertIn("function", matches[0]["location"])
+        self.assertEqual("http://codeflow.test/api/codeflow/symbols/search", urlopen.call_args.args[0].full_url)
 
     def test_33_unhandled_exception_writes_persistent_crash_log(self):
         crash_path = self.root / "crash.log"
