@@ -9,6 +9,7 @@ Usage:
 import sys
 import os
 import threading
+import json
 import argparse
 from pathlib import Path
 
@@ -17,7 +18,7 @@ from PyQt6.QtWidgets import (
     QStackedWidget, QPushButton, QLabel, QLineEdit, QTextEdit,
     QFileDialog, QCheckBox, QProgressBar, QListWidget, QListWidgetItem,
     QTreeView, QSplitter, QTabWidget, QComboBox, QAbstractItemView,
-    QSystemTrayIcon, QMenu, QSizePolicy, QFrame,
+    QSystemTrayIcon, QMenu, QSizePolicy, QFrame, QSpinBox, QMessageBox,
 )
 from PyQt6.QtCore import (
     Qt, QDir, QModelIndex, pyqtSignal, QObject, QThread,
@@ -30,6 +31,7 @@ import mru_manager as mru
 from rdc_archive import run_archive
 from rdc_training_sync import run_sync
 from rdc_scaffold import build as run_scaffold
+import rg_search
 
 # ── Dark stylesheet ──────────────────────────────────────────────────────────
 DARK_QSS = """
@@ -176,6 +178,213 @@ class FilePanel(QWidget):
         self.recent_files.clear()
         for f in mru.get_recent_files():
             self.recent_files.addItem(f)
+
+
+# ── Portable ripgrep search ──────────────────────────────────────────────────
+class SearchPanel(QWidget):
+    """On-demand local search. The portable JSON file is the source of truth."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.config = mru.load_search_config()
+        self.signals = WorkerSignals()
+        self.signals.result.connect(self._add_result)
+        self.signals.log.connect(self._set_status)
+        self.signals.done.connect(self._finish_search)
+        self.match_count = 0
+
+        tabs = QTabWidget(self)
+        outer = QVBoxLayout(self)
+        outer.addWidget(tabs)
+
+        search_page = QWidget()
+        layout = QVBoxLayout(search_page)
+        title = QLabel("Portable Source Search"); title.setObjectName("section_title")
+        layout.addWidget(title)
+
+        query_row = QHBoxLayout()
+        self.query = QLineEdit(); self.query.setPlaceholderText("Find text or regular expression…")
+        self.query.returnPressed.connect(self._run_search)
+        query_row.addWidget(self.query)
+        self.search_button = QPushButton("▶ Search")
+        self.search_button.clicked.connect(self._run_search)
+        query_row.addWidget(self.search_button)
+        layout.addLayout(query_row)
+
+        profile_row = QHBoxLayout()
+        profile_row.addWidget(QLabel("Pinned search:"))
+        self.profile_combo = QComboBox()
+        self.profile_combo.currentIndexChanged.connect(self._apply_profile)
+        profile_row.addWidget(self.profile_combo, 1)
+        self.pin_button = QPushButton("Pin / Unpin")
+        self.pin_button.clicked.connect(self._toggle_pin)
+        profile_row.addWidget(self.pin_button)
+        layout.addLayout(profile_row)
+
+        options = QHBoxLayout()
+        self.regex = QCheckBox("Regex")
+        self.case_insensitive = QCheckBox("Ignore case")
+        self.whole_word = QCheckBox("Whole word")
+        self.hidden = QCheckBox("Include hidden")
+        self.follow = QCheckBox("Follow links")
+        self.no_ignore = QCheckBox("Ignore .gitignore")
+        for box in (self.regex, self.case_insensitive, self.whole_word, self.hidden, self.follow, self.no_ignore):
+            box.stateChanged.connect(self._save_visible_options)
+            options.addWidget(box)
+        options.addStretch()
+        layout.addLayout(options)
+
+        tuning = QHBoxLayout()
+        tuning.addWidget(QLabel("Max depth (0 = unlimited):"))
+        self.max_depth = QSpinBox(); self.max_depth.setRange(0, 999); self.max_depth.valueChanged.connect(self._save_visible_options)
+        tuning.addWidget(self.max_depth)
+        tuning.addWidget(QLabel("Threads (0 = rg default):"))
+        self.threads = QSpinBox(); self.threads.setRange(0, 64); self.threads.valueChanged.connect(self._save_visible_options)
+        tuning.addWidget(self.threads)
+        tuning.addWidget(QLabel("Max matches/file:"))
+        self.max_matches = QSpinBox(); self.max_matches.setRange(1, 100000); self.max_matches.valueChanged.connect(self._save_visible_options)
+        tuning.addWidget(self.max_matches)
+        tuning.addStretch()
+        layout.addLayout(tuning)
+
+        self.scope = QLabel(); self.scope.setWordWrap(True); self.scope.setStyleSheet("color:#aaa;")
+        layout.addWidget(self.scope)
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.results = QListWidget(); self.results.itemSelectionChanged.connect(self._show_context)
+        self.results.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.context = QTextEdit(); self.context.setReadOnly(True); self.context.setFont(QFont("Cascadia Mono", 10))
+        splitter.addWidget(self.results); splitter.addWidget(self.context); splitter.setSizes([550, 650])
+        layout.addWidget(splitter, 1)
+        self.status = QLabel("Ready. Searches are on demand; no Windows index is used.")
+        layout.addWidget(self.status)
+        tabs.addTab(search_page, "Search")
+
+        config_page = QWidget()
+        config_layout = QVBoxLayout(config_page)
+        config_layout.addWidget(QLabel("Portable settings: " + str(mru.search_config_path())))
+        self.config_editor = QTextEdit(); self.config_editor.setFont(QFont("Cascadia Mono", 10))
+        config_layout.addWidget(self.config_editor)
+        config_buttons = QHBoxLayout()
+        reload_button = QPushButton("Reload from file"); reload_button.clicked.connect(self._reload_config)
+        save_button = QPushButton("Save settings"); save_button.clicked.connect(self._save_config_editor)
+        config_buttons.addWidget(reload_button); config_buttons.addWidget(save_button); config_buttons.addStretch()
+        config_layout.addLayout(config_buttons)
+        tabs.addTab(config_page, "Profiles & Settings")
+        self._reload_config()
+
+    def _profiles(self):
+        return self.config.get("profiles", [])
+
+    def _profile(self):
+        index = self.profile_combo.currentIndex()
+        return self._profiles()[index] if 0 <= index < len(self._profiles()) else None
+
+    def _reload_config(self):
+        self.config = mru.load_search_config()
+        self.config_editor.setPlainText(json.dumps(self.config, indent=2, ensure_ascii=False))
+        self.profile_combo.blockSignals(True); self.profile_combo.clear()
+        for profile in self._profiles():
+            prefix = "📌 " if profile.get("pinned") else "   "
+            self.profile_combo.addItem(prefix + profile.get("name", "Unnamed"))
+        active = self.config.get("active_profile", "")
+        for i, profile in enumerate(self._profiles()):
+            if profile.get("name") == active:
+                self.profile_combo.setCurrentIndex(i)
+                break
+        self.profile_combo.blockSignals(False)
+        self._apply_profile()
+
+    def _save_config_editor(self):
+        try:
+            config = json.loads(self.config_editor.toPlainText())
+            if not isinstance(config.get("profiles"), list) or not config["profiles"]:
+                raise ValueError("profiles must be a non-empty list")
+            mru.save_search_config(config)
+            self._reload_config()
+            self._set_status("Saved portable profile settings.")
+        except Exception as exc:
+            QMessageBox.warning(self, "Invalid settings", str(exc))
+
+    def _apply_profile(self):
+        profile = self._profile()
+        if not profile:
+            return
+        self.config["active_profile"] = profile.get("name", "")
+        options = profile.setdefault("options", {})
+        widgets = ((self.regex, "regex"), (self.case_insensitive, "case_insensitive"),
+                   (self.whole_word, "whole_word"), (self.hidden, "hidden"),
+                   (self.follow, "follow_symlinks"), (self.no_ignore, "no_ignore"))
+        for widget, key in widgets:
+            widget.blockSignals(True); widget.setChecked(bool(options.get(key, False))); widget.blockSignals(False)
+        for widget, key in ((self.max_depth, "max_depth"), (self.threads, "threads"), (self.max_matches, "max_matches_per_file")):
+            widget.blockSignals(True); widget.setValue(int(options.get(key, 0 if key != "max_matches_per_file" else 100))); widget.blockSignals(False)
+        self.scope.setText("Roots: " + "; ".join(profile.get("roots", [])) + "\nIncludes: " + "; ".join(profile.get("include", [])) + "\nExcludes: " + "; ".join(profile.get("exclude", [])))
+
+    def _save_visible_options(self):
+        profile = self._profile()
+        if not profile:
+            return
+        profile["options"] = {"regex": self.regex.isChecked(), "case_insensitive": self.case_insensitive.isChecked(),
+                              "whole_word": self.whole_word.isChecked(), "hidden": self.hidden.isChecked(),
+                              "follow_symlinks": self.follow.isChecked(), "no_ignore": self.no_ignore.isChecked(),
+                              "max_depth": self.max_depth.value(), "threads": self.threads.value(),
+                              "max_matches_per_file": self.max_matches.value(),
+                              "max_file_size": profile.get("options", {}).get("max_file_size", "10M")}
+        mru.save_search_config(self.config)
+        self.config_editor.setPlainText(json.dumps(self.config, indent=2, ensure_ascii=False))
+
+    def _toggle_pin(self):
+        profile = self._profile()
+        if profile:
+            profile["pinned"] = not profile.get("pinned", False)
+            mru.save_search_config(self.config)
+            self._reload_config()
+
+    def _run_search(self):
+        query = self.query.text().strip()
+        profile = self._profile()
+        if not query or not profile:
+            self._set_status("Enter search text and select a profile.")
+            return
+        self._save_visible_options()
+        self.results.clear(); self.context.clear(); self.match_count = 0; self.search_button.setEnabled(False)
+        self._set_status("Searching selected roots…")
+        threading.Thread(target=self._search_worker, args=(query, profile.copy(), self.config.copy()), daemon=True).start()
+
+    def _search_worker(self, query, profile, config):
+        try:
+            for match in rg_search.search(query, profile, config):
+                self.signals.result.emit(match)
+            self.signals.log.emit(f"Complete: {self.match_count} matching lines.")
+        except Exception as exc:
+            self.signals.log.emit(f"Search failed: {exc}")
+        finally:
+            self.signals.done.emit()
+
+    def _add_result(self, match):
+        self.match_count += 1
+        item = QListWidgetItem(f"{match['path']}:{match['line']}:{match['column']}  {match['text']}")
+        item.setData(Qt.ItemDataRole.UserRole, match)
+        self.results.addItem(item)
+
+    def _show_context(self):
+        selected = self.results.selectedItems()
+        if not selected:
+            return
+        match = selected[0].data(Qt.ItemDataRole.UserRole)
+        path = Path(match["path"])
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            start, end = max(0, match["line"] - 4), min(len(lines), match["line"] + 3)
+            rendered = [f"{n + 1:>6}  {'>' if n + 1 == match['line'] else ' '} {lines[n]}" for n in range(start, end)]
+            self.context.setPlainText(f"{path}\n\n" + "\n".join(rendered))
+        except Exception as exc:
+            self.context.setPlainText(f"{path}\n\nContext preview unavailable: {exc}")
+
+    def _set_status(self, message):
+        self.status.setText(message)
+
+    def _finish_search(self):
+        self.search_button.setEnabled(True)
 
 
 # ── Archive Panel ─────────────────────────────────────────────────────────────
@@ -555,6 +764,7 @@ class MainWindow(QMainWindow):
         self.stack = QStackedWidget()
         self.panels = [
             ("📁  Files",     FilePanel(settings)),
+            ("⌕  Search",    SearchPanel()),
             ("🗄  Archive",   ArchivePanel(settings)),
             ("🧠  Training",  TrainingPanel(settings)),
             ("🤖  AI Tools",  AIToolsPanel(settings)),
@@ -575,7 +785,8 @@ class MainWindow(QMainWindow):
         root_layout.addWidget(self.stack)
 
         # Wire settings changes
-        self.panels[4][1].settings_changed.connect(self._on_settings_changed)
+        settings_panel = next(panel for label, panel in self.panels if label.endswith("Settings"))
+        settings_panel.settings_changed.connect(self._on_settings_changed)
 
         # Tray
         self._setup_tray()

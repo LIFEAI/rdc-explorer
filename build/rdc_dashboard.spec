@@ -12,6 +12,7 @@ a = Analysis(
     binaries=[],
     datas=[
         (os.path.join(ASSETS, 'icon.png'), 'assets'),
+        (os.path.join(os.path.dirname(SPECPATH), 'rg-search.default.json'), '.'),
     ],
     hiddenimports=[
         'mru_manager',

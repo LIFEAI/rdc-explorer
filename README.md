@@ -13,6 +13,7 @@ Desktop application for managing RDC company files, versioning, AI training sync
 | **Training Sync** | Find all `_TRAIN_`-tagged files, copy latest versions to `00 - _AI-Training/` |
 | **AI Tools** | Chat with Claude, OpenAI, or Gemini — switch models on the fly |
 | **Settings** | Set RDC2 root, API keys, scaffold new folder trees |
+| **Search** | On-demand portable `rg` search with pinned profiles, file masks, exclusions, selectable results, and context preview |
 
 ---
 
@@ -84,6 +85,32 @@ rdc-ai-dashboard/
 ---
 
 ## File Naming Convention
+
+## Portable Search Profiles
+
+The Search panel reads `rg-search.json` beside the executable. The first launch
+copies it from `rg-search.default.json` when the editable file is missing. Set
+`rg_path` to a specific `rg.exe` if it is not on `PATH`; profiles carry all
+roots, include masks, exclusions, and tuning state so a copied application
+folder retains its search behavior.
+
+| Setting | ripgrep behavior |
+|---|---|
+| `regex` | regex expression rather than literal text |
+| `case_insensitive` | `--ignore-case` |
+| `whole_word` | `--word-regexp` |
+| `hidden` | `--hidden` |
+| `follow_symlinks` | `--follow` |
+| `no_ignore` | `--no-ignore`; deliberately bypasses `.gitignore`/`.ignore` |
+| `max_depth` | `--max-depth`; `0` means unlimited |
+| `threads` | `--threads`; `0` lets ripgrep choose |
+| `max_matches_per_file` | `--max-count` |
+| `max_file_size` | `--max-filesize` |
+
+The included **Source + Docs** profile starts from `C:\\Dev` and the canonical
+corpus, explicitly limits files to textual source/document formats, and excludes
+worktrees, dependency trees, generated output, caches, and archives. It never
+uses Windows Search or a background content index.
 
 All RDC files follow: `CompanyCode_Purpose_Type_VX.XX.ext`
 

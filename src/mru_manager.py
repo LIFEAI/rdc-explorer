@@ -5,6 +5,7 @@ Stores data in %APPDATA%/RDC_Dashboard/ (Windows) or ~/.config/RDC_Dashboard/ (M
 import json
 import os
 import sys
+import shutil
 from pathlib import Path
 
 APP_NAME = "RDC_Dashboard"
@@ -19,6 +20,32 @@ def _config_dir() -> Path:
     d = Path(base) / APP_NAME
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+def _resource_path(filename: str) -> Path:
+    """Resolve a file bundled by PyInstaller or located in the source tree."""
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent))
+    return base / filename
+
+
+def search_config_path() -> Path:
+    """Portable search settings live beside the executable, never in AppData."""
+    if getattr(sys, "frozen", False):
+        base = Path(sys.executable).resolve().parent
+    else:
+        base = Path(__file__).resolve().parent.parent
+    return base / "rg-search.json"
+
+
+def load_search_config() -> dict:
+    target = search_config_path()
+    if not target.exists():
+        shutil.copyfile(_resource_path("rg-search.default.json"), target)
+    return json.loads(target.read_text(encoding="utf-8"))
+
+
+def save_search_config(config: dict):
+    search_config_path().write_text(json.dumps(config, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
 def _load(filename: str) -> dict:
