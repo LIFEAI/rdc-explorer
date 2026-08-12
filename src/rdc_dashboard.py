@@ -11,6 +11,9 @@ import os
 import threading
 import json
 import argparse
+import traceback
+import faulthandler
+from datetime import datetime
 from pathlib import Path
 
 from PyQt6.QtWidgets import (
@@ -32,6 +35,29 @@ from rdc_archive import run_archive
 from rdc_training_sync import run_sync
 from rdc_scaffold import build as run_scaffold
 import rg_search
+
+FAULT_LOG_HANDLE = None
+
+
+def write_crash_log(origin, exc_type, exc_value, exc_traceback):
+    """Append a readable exception record without ever masking the original failure."""
+    try:
+        stamp = datetime.now().astimezone().isoformat(timespec="seconds")
+        detail = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
+        with mru.crash_log_path().open("a", encoding="utf-8") as handle:
+            handle.write(f"\n{'=' * 88}\n{stamp}  origin={origin}\n{detail}")
+    except Exception:
+        pass
+
+
+class SafeApplication(QApplication):
+    """Keeps a bad UI callback from silently killing the desktop process."""
+    def notify(self, receiver, event):
+        try:
+            return super().notify(receiver, event)
+        except Exception:
+            write_crash_log("qt-event", *sys.exc_info())
+            return False
 
 # ── Dark stylesheet ──────────────────────────────────────────────────────────
 DARK_QSS = """
@@ -84,6 +110,7 @@ class WorkerSignals(QObject):
     failed = pyqtSignal(str)
     done   = pyqtSignal()
     result = pyqtSignal(object)
+    search_finished = pyqtSignal(int)
 
 
 class ZoomableContext(QTextEdit):
@@ -220,7 +247,7 @@ class SearchPanel(QWidget):
         self.signals.result.connect(self._add_results)
         self.signals.log.connect(self._set_status)
         self.signals.failed.connect(self._search_failed)
-        self.signals.done.connect(self._finish_search)
+        self.signals.search_finished.connect(self._finish_search)
         self.match_count = 0
         self.matched_paths = set()
         self.result_items = []
@@ -228,6 +255,7 @@ class SearchPanel(QWidget):
         self.directory_items = {}
         self.file_items = {}
         self.cancel_event = None
+        self.search_generation = 0
 
         tabs = QTabWidget(self)
         outer = QVBoxLayout(self)
@@ -273,6 +301,17 @@ class SearchPanel(QWidget):
             options.addWidget(box)
         options.addStretch()
         layout.addLayout(options)
+
+        file_types = QHBoxLayout()
+        file_types.addWidget(QLabel("File types:"))
+        self.file_types = QLineEdit()
+        self.file_types.setPlaceholderText("*.md, *.py, *.pdf  (comma-separated; blank = profile defaults)")
+        self.file_types.editingFinished.connect(self._save_visible_options)
+        file_types.addWidget(self.file_types, 1)
+        markdown_only = QPushButton("Markdown only")
+        markdown_only.clicked.connect(lambda: self.set_file_types("*.md, *.mdx"))
+        file_types.addWidget(markdown_only)
+        layout.addLayout(file_types)
 
         tuning = QHBoxLayout()
         tuning.addWidget(QLabel("Max depth (0 = unlimited):"))
@@ -375,6 +414,15 @@ class SearchPanel(QWidget):
             control.blockSignals(False)
         self._save_visible_options()
 
+    def set_file_types(self, patterns):
+        """Public controller seam for the visible comma-separated include filter."""
+        values = [value.strip() for value in str(patterns).split(",") if value.strip()]
+        if not values:
+            raise ValueError("Enter at least one file type, for example *.md")
+        self.file_types.setText(", ".join(values))
+        self._save_visible_options()
+        return values
+
     def set_pinned(self, pinned):
         profile = self._profile()
         if not profile:
@@ -471,6 +519,7 @@ class SearchPanel(QWidget):
                    (self.follow, "follow_symlinks"), (self.no_ignore, "no_ignore"))
         for widget, key in widgets:
             widget.blockSignals(True); widget.setChecked(bool(options.get(key, False))); widget.blockSignals(False)
+        self.file_types.blockSignals(True); self.file_types.setText(", ".join(profile.get("include", []))); self.file_types.blockSignals(False)
         for widget, key in ((self.max_depth, "max_depth"), (self.threads, "threads"), (self.max_matches, "max_matches_per_file"), (self.max_total_results, "max_total_results")):
             default = 5000 if key == "max_total_results" else (100 if key == "max_matches_per_file" else 0)
             widget.blockSignals(True); widget.setValue(int(options.get(key, default))); widget.blockSignals(False)
@@ -496,6 +545,9 @@ class SearchPanel(QWidget):
                               "max_depth": self.max_depth.value(), "threads": self.threads.value(),
                               "max_matches_per_file": self.max_matches.value(), "max_total_results": self.max_total_results.value(),
                               "max_file_size": profile.get("options", {}).get("max_file_size", "10M")}
+        typed_patterns = [value.strip() for value in self.file_types.text().split(",") if value.strip()]
+        if typed_patterns:
+            profile["include"] = typed_patterns
         mru.save_search_config(self.config)
         self.config_editor.setPlainText(json.dumps(self.config, indent=2, ensure_ascii=False))
 
@@ -511,6 +563,10 @@ class SearchPanel(QWidget):
             self._set_status("Enter search text and select a profile.")
             return
         self._save_visible_options()
+        if self.cancel_event:
+            self.cancel_event.set()
+        self.search_generation += 1
+        generation = self.search_generation
         self.results.clear(); self.context.clear(); self.match_count = 0; self.matched_paths = set(); self.search_error = ""; self.search_button.setEnabled(False); self.cancel_button.setEnabled(True)
         self.result_items = []
         self.result_matches = []
@@ -518,7 +574,7 @@ class SearchPanel(QWidget):
         self.file_items = {}
         self.cancel_event = threading.Event()
         self._set_status("Searching selected roots…")
-        threading.Thread(target=self._search_worker, args=(query, profile.copy(), self.config.copy(), self.cancel_event), daemon=True).start()
+        threading.Thread(target=self._search_worker, args=(generation, query, profile.copy(), self.config.copy(), self.cancel_event), daemon=True).start()
 
     def cancel_search(self):
         if self.cancel_event:
@@ -526,22 +582,25 @@ class SearchPanel(QWidget):
             self.cancel_button.setEnabled(False)
             self._set_status("Cancelling search…")
 
-    def _search_worker(self, query, profile, config, cancel_event):
+    def _search_worker(self, generation, query, profile, config, cancel_event):
         try:
             batch = []
             for match in rg_search.search(query, profile, config, cancel_event):
                 batch.append(match)
                 if len(batch) >= 100:
-                    self.signals.result.emit(batch)
+                    self.signals.result.emit((generation, batch))
                     batch = []
             if batch:
-                self.signals.result.emit(batch)
+                self.signals.result.emit((generation, batch))
         except Exception as exc:
-            self.signals.failed.emit(str(exc))
+            self.signals.failed.emit((generation, str(exc)))
         finally:
-            self.signals.done.emit()
+            self.signals.search_finished.emit(generation)
 
-    def _add_results(self, matches):
+    def _add_results(self, payload):
+        generation, matches = payload if isinstance(payload, tuple) else (self.search_generation, payload)
+        if generation != self.search_generation:
+            return
         for match in (matches if isinstance(matches, list) else [matches]):
             self._add_result(match)
 
@@ -613,11 +672,16 @@ class SearchPanel(QWidget):
             self.context.zoomIn(-self.context_zoom)
             self.context_zoom = 0
 
-    def _search_failed(self, message):
+    def _search_failed(self, payload):
+        generation, message = payload if isinstance(payload, tuple) else (self.search_generation, payload)
+        if generation != self.search_generation:
+            return
         self.search_error = message
         self._set_status(f"Search failed: {message}")
 
-    def _finish_search(self):
+    def _finish_search(self, generation=None):
+        if generation is not None and generation != self.search_generation:
+            return
         self.search_button.setEnabled(True)
         self.cancel_button.setEnabled(False)
         if not self.search_error:
@@ -1124,7 +1188,20 @@ def main():
         rg_search.runtime_self_test()
         return
 
-    app = QApplication(sys.argv)
+    global FAULT_LOG_HANDLE
+    try:
+        FAULT_LOG_HANDLE = mru.crash_log_path().open("a", encoding="utf-8", buffering=1)
+        FAULT_LOG_HANDLE.write(f"\n{'=' * 88}\n{datetime.now().astimezone().isoformat(timespec='seconds')}  startup\n")
+        faulthandler.enable(file=FAULT_LOG_HANDLE, all_threads=True)
+    except Exception:
+        FAULT_LOG_HANDLE = None
+    sys.excepthook = lambda exc_type, exc_value, exc_traceback: write_crash_log(
+        "main-thread", exc_type, exc_value, exc_traceback
+    )
+    threading.excepthook = lambda args: write_crash_log(
+        f"thread:{args.thread.name}", args.exc_type, args.exc_value, args.exc_traceback
+    )
+    app = SafeApplication(sys.argv)
     app.setApplicationName("RDC Dashboard")
     app.setQuitOnLastWindowClosed(False)
 

@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -315,6 +316,34 @@ class PortableSearchHarness(unittest.TestCase):
     def test_30_both_high_contrast_theme_palettes_are_shipped(self):
         self.assertIn("background: #1e1e1e", rdc_dashboard.DARK_QSS)
         self.assertIn("background: #f7f9fc", rdc_dashboard.LIGHT_QSS)
+
+    def test_31_repeated_search_discards_old_results_and_stale_batches(self):
+        self.search("needle")
+        old_generation = self.panel.search_generation
+        current = self.search("typeprobe")
+        self.assertTrue(current)
+        self.assertTrue(all("typeprobe" in match["text"] for match in current))
+        before = self.panel.match_count
+        self.panel._add_results((old_generation, [{"path": "C:/stale.md", "line": 1, "text": "stale"}]))
+        self.assertEqual(before, self.panel.match_count)
+        self.assertEqual(before, len(self.panel.result_matches))
+
+    def test_32_visible_file_type_filter_supports_string_in_markdown(self):
+        self.assertEqual(["*.md"], self.panel.set_file_types("*.md"))
+        matches = self.search("needle")
+        self.assertTrue(matches)
+        self.assertTrue(all(Path(match["path"]).suffix == ".md" for match in matches))
+
+    def test_33_unhandled_exception_writes_persistent_crash_log(self):
+        crash_path = self.root / "crash.log"
+        with patch.object(rdc_dashboard.mru, "crash_log_path", lambda: crash_path):
+            try:
+                raise RuntimeError("harness crash sentinel")
+            except RuntimeError:
+                rdc_dashboard.write_crash_log("harness", *sys.exc_info())
+        text = crash_path.read_text(encoding="utf-8")
+        self.assertIn("origin=harness", text)
+        self.assertIn("harness crash sentinel", text)
 
 
 def main():

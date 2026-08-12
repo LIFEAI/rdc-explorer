@@ -24,6 +24,11 @@ def _config_dir() -> Path:
     return d
 
 
+def crash_log_path() -> Path:
+    """Persistent diagnostic log for unhandled desktop-app failures."""
+    return _config_dir() / "crash.log"
+
+
 def _resource_path(filename: str) -> Path:
     """Resolve a file bundled by PyInstaller or located in the source tree."""
     base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent))
