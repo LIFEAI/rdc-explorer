@@ -868,6 +868,15 @@ class MainWindow(QMainWindow):
         for i, btn in enumerate(self.nav_buttons):
             btn.setChecked(i == idx)
 
+    def select_panel(self, page):
+        """Public navigation seam shared by startup, UI actions, and tests."""
+        requested = page.casefold()
+        for index, (label, _) in enumerate(self.panels):
+            if requested in label.casefold():
+                self._switch(index)
+                return True
+        return False
+
     def _on_settings_changed(self, new_settings: dict):
         self.settings.update(new_settings)
 
@@ -918,6 +927,8 @@ class MainWindow(QMainWindow):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--tray", action="store_true", help="Start minimised to tray")
+    parser.add_argument("--page", choices=("files", "search", "archive", "training", "ai", "settings"),
+                        help="Open a named dashboard page at startup")
     args = parser.parse_args()
 
     app = QApplication(sys.argv)
@@ -927,6 +938,8 @@ def main():
 
     settings = mru.load_settings()
     window = MainWindow(settings)
+    if args.page:
+        window.select_panel(args.page)
 
     if not args.tray:
         window.show()
