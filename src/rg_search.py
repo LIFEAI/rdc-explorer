@@ -22,6 +22,20 @@ def locate_rg(config: dict) -> str | None:
     return shutil.which("rg.exe") or shutil.which("rg")
 
 
+def runtime_self_test() -> dict:
+    """Verify the bundled Search runtime can execute every required component."""
+    rg = locate_rg({})
+    if not rg:
+        raise RuntimeError("Bundled ripgrep was not found")
+    probe = subprocess.run([rg, "--version"], capture_output=True, text=True, timeout=10, check=False)
+    if probe.returncode != 0:
+        raise RuntimeError(probe.stderr.strip() or "Bundled ripgrep could not execute")
+    import pymupdf  # noqa: F401
+    import docx  # noqa: F401
+    import pptx  # noqa: F401
+    return {"rg": rg}
+
+
 def _document_patterns(profile: dict) -> list[str]:
     return [pattern for pattern in profile.get("include", []) if Path(pattern).suffix.lower() in DOCUMENT_SUFFIXES]
 

@@ -276,6 +276,9 @@ class PortableSearchHarness(unittest.TestCase):
         self.panel.reload_settings()
         self.assertTrue(all(pattern in self.panel._profile()["include"] for pattern in ("*.pdf", "*.docx", "*.pptx")))
 
+    def test_25_search_runtime_dependencies_execute(self):
+        self.assertTrue(Path(rg_search.runtime_self_test()["rg"]).is_file())
+
 
 def main():
     parser = argparse.ArgumentParser()

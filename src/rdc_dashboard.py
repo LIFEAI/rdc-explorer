@@ -976,11 +976,7 @@ def main():
     args = parser.parse_args()
 
     if args.self_test:
-        if not rg_search.locate_rg({}):
-            raise RuntimeError("Bundled ripgrep was not found")
-        import pymupdf  # noqa: F401
-        import docx  # noqa: F401
-        import pptx  # noqa: F401
+        rg_search.runtime_self_test()
         return
 
     app = QApplication(sys.argv)
