@@ -58,6 +58,20 @@ def run_panel_search(root: Path, profile_path: Path, query: str, include: list[s
 
     mru.search_config_path = lambda: profile_path
     panel = SearchPanel()
+    assert panel.select_profile("Harness")
+    panel.set_search_options(
+        regex=True, case_insensitive=False, whole_word=False, hidden=True,
+        follow_symlinks=True, no_ignore=True, max_depth=3, threads=2,
+        max_matches_per_file=7,
+    )
+    enabled_command = rg_search.build_command(query, panel._profile(), panel.config)
+    assert "--fixed-strings" not in enabled_command
+    assert "--ignore-case" not in enabled_command
+    assert "--word-regexp" not in enabled_command
+    assert all(flag in enabled_command for flag in ("--hidden", "--follow", "--no-ignore", "--max-depth", "--threads"))
+    assert enabled_command[enabled_command.index("--max-depth") + 1] == "3"
+    assert enabled_command[enabled_command.index("--threads") + 1] == "2"
+    assert enabled_command[enabled_command.index("--max-count") + 1] == "7"
     panel.set_search_options(
         regex=False, case_insensitive=True, whole_word=True, hidden=False,
         follow_symlinks=False, no_ignore=False, max_depth=0, threads=0,
