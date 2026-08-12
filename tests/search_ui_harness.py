@@ -4,6 +4,7 @@ Run from the project root:
   set QT_QPA_PLATFORM=offscreen
   build_venv\\Scripts\\python tests\\search_ui_harness.py
 """
+import argparse
 import json
 import os
 import shutil
@@ -13,46 +14,41 @@ import time
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication
 
 import mru_manager as mru
+import rg_search
 from rdc_dashboard import SearchPanel
+
+APP = None
 
 
 def wait_until(predicate, timeout_seconds=12):
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         QApplication.processEvents()
-        QTest.qWait(50)
+        time.sleep(0.05)
         if predicate():
             return
     raise AssertionError("Timed out waiting for UI search completion")
 
 
-def main():
+def run_panel_search(root: Path, profile_path: Path, query: str, include: list[str], exclude: list[str], expected_count: int = 1):
+    global APP
     rg_path = shutil.which("rg.exe") or shutil.which("rg")
     if not rg_path:
         raise AssertionError("rg is required for the UI harness")
-
-    app = QApplication.instance() or QApplication([])
-    with tempfile.TemporaryDirectory(prefix="rdc-search-harness-") as temp:
-        root = Path(temp)
-        (root / "notes.md").write_text("Before\nNeedle appears here\nAfter\n", encoding="utf-8")
-        (root / "script.py").write_text("needle = 'second result'\n", encoding="utf-8")
-        skipped = root / "node_modules"
-        skipped.mkdir()
-        (skipped / "skip.md").write_text("Needle must not be searched\n", encoding="utf-8")
-        config_path = root / "rg-search.json"
-        config_path.write_text(json.dumps({
+    APP = QApplication.instance() or QApplication([])
+    profile_path.write_text(json.dumps({
             "rg_path": rg_path,
             "active_profile": "Harness",
             "profiles": [{
                 "name": "Harness", "pinned": True, "roots": [str(root)],
-                "include": ["*.md", "*.py"], "exclude": ["**/node_modules/**"],
+                "include": include, "exclude": exclude,
                 "options": {"regex": False, "case_insensitive": True, "whole_word": False,
                             "hidden": False, "follow_symlinks": False, "no_ignore": False,
                             "max_depth": 0, "threads": 0, "max_matches_per_file": 100,
@@ -60,31 +56,67 @@ def main():
             }]
         }), encoding="utf-8")
 
-        original_path = mru.search_config_path
-        mru.search_config_path = lambda: config_path
-        try:
-            panel = SearchPanel()
-            panel.show()
-            QTest.keyClicks(panel.query, "needle")
-            QTest.mouseClick(panel.whole_word, Qt.MouseButton.LeftButton)
-            QTest.mouseClick(panel.search_button, Qt.MouseButton.LeftButton)
-            wait_until(lambda: panel.search_button.isEnabled())
+    mru.search_config_path = lambda: profile_path
+    panel = SearchPanel()
+    panel.set_search_options(
+        regex=False, case_insensitive=True, whole_word=True, hidden=False,
+        follow_symlinks=False, no_ignore=False, max_depth=0, threads=0,
+        max_matches_per_file=100,
+    )
+    expected_options = {
+        "regex": False, "case_insensitive": True, "whole_word": True,
+        "hidden": False, "follow_symlinks": False, "no_ignore": False,
+        "max_depth": 0, "threads": 0, "max_matches_per_file": 100,
+    }
+    assert all(panel._profile()["options"][key] == value for key, value in expected_options.items())
+    command = rg_search.build_command(query, panel._profile(), panel.config)
+    assert "--fixed-strings" in command and "--ignore-case" in command and "--word-regexp" in command
+    panel.submit_search(query)
+    wait_until(lambda: panel.search_button.isEnabled(), timeout_seconds=30)
+    assert panel.results.count() >= expected_count, panel.status.text()
+    assert panel.select_result(0)
+    wait_until(lambda: bool(panel.context.toPlainText()))
+    return panel
 
-            assert panel.results.count() == 2, [panel.results.item(i).text() for i in range(panel.results.count())]
-            result_paths = "\n".join(panel.results.item(i).text() for i in range(panel.results.count()))
-            assert "notes.md" in result_paths and "script.py" in result_paths
-            assert "skip.md" not in result_paths
 
-            panel.results.setCurrentRow(0)
-            wait_until(lambda: "Needle appears here" in panel.context.toPlainText())
-            assert "> Needle appears here" in panel.context.toPlainText()
-
-            QTest.mouseClick(panel.pin_button, Qt.MouseButton.LeftButton)
-            saved = json.loads(config_path.read_text(encoding="utf-8"))
-            assert saved["profiles"][0]["pinned"] is False
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--live-regen-root", action="store_true")
+    args = parser.parse_args()
+    if args.live_regen_root:
+        root = Path(r"C:\Dev\regen-root")
+        assert root.is_dir(), root
+        with tempfile.TemporaryDirectory(prefix="rdc-live-ui-test-") as temp:
+            panel = run_panel_search(root, Path(temp) / "rg-search.json", "surface", ["*.md"],
+                                     ["**/.git/**", "**/node_modules/**", "**/.next/**", "**/dist/**", "**/build/**"], 1)
+            print(f"LIVE_REGEN_ROOT_UI_OK {panel.status.text()}")
+            for i in range(min(20, panel.results.count())):
+                print(panel.results.item(i).text())
+            print("SELECTED_CONTEXT")
+            print(panel.context.toPlainText()[:1200])
             panel.close()
-        finally:
-            mru.search_config_path = original_path
+        return
+
+    with tempfile.TemporaryDirectory(prefix="rdc-search-harness-") as temp:
+        root = Path(temp)
+        (root / "notes.md").write_text("Before\nNeedle appears here\nAfter\n", encoding="utf-8")
+        (root / "script.py").write_text("needle = 'second result'\n", encoding="utf-8")
+        skipped = root / "node_modules"
+        skipped.mkdir()
+        (skipped / "skip.md").write_text("Needle must not be searched\n", encoding="utf-8")
+        panel = run_panel_search(root, root / "rg-search.json", "needle", ["*.md", "*.py"], ["**/node_modules/**"], 2)
+        assert panel.results.count() == 2, [panel.results.item(i).text() for i in range(panel.results.count())]
+        assert panel.status.text() == "Complete: 2 matching lines in 2 files.", panel.status.text()
+        result_paths = "\n".join(panel.results.item(i).text() for i in range(panel.results.count()))
+        assert "notes.md" in result_paths and "script.py" in result_paths
+        assert "skip.md" not in result_paths
+        assert "> needle" in panel.context.toPlainText().lower()
+        assert panel.set_pinned(False)
+        assert panel.save_settings()
+        panel.reload_settings()
+        saved = json.loads((root / "rg-search.json").read_text(encoding="utf-8"))
+        assert saved["profiles"][0]["pinned"] is False
+        panel.close()
     print("SEARCH_UI_HARNESS_OK")
 
 
