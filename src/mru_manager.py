@@ -10,6 +10,7 @@ from pathlib import Path
 
 APP_NAME = "RDC_Dashboard"
 MAX_MRU = 20
+DOCUMENT_SEARCH_PATTERNS = ("*.pdf", "*.docx", "*.pptx")
 
 
 def _config_dir() -> Path:
@@ -41,7 +42,19 @@ def load_search_config() -> dict:
     target = search_config_path()
     if not target.exists():
         shutil.copyfile(_resource_path("rg-search.default.json"), target)
-    return json.loads(target.read_text(encoding="utf-8"))
+    config = json.loads(target.read_text(encoding="utf-8"))
+    # Existing portable profiles keep their roots and preferences; a feature update
+    # only appends the requested document types that were previously unavailable.
+    changed = False
+    for profile in config.get("profiles", []):
+        included = profile.setdefault("include", [])
+        for pattern in DOCUMENT_SEARCH_PATTERNS:
+            if pattern not in included:
+                included.append(pattern)
+                changed = True
+    if changed:
+        save_search_config(config)
+    return config
 
 
 def save_search_config(config: dict):

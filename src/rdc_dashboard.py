@@ -62,6 +62,7 @@ QFrame#divider                { color: #444; }
 # ── Worker signals ───────────────────────────────────────────────────────────
 class WorkerSignals(QObject):
     log    = pyqtSignal(str)
+    failed = pyqtSignal(str)
     done   = pyqtSignal()
     result = pyqtSignal(object)
 
@@ -189,6 +190,7 @@ class SearchPanel(QWidget):
         self.signals = WorkerSignals()
         self.signals.result.connect(self._add_result)
         self.signals.log.connect(self._set_status)
+        self.signals.failed.connect(self._search_failed)
         self.signals.done.connect(self._finish_search)
         self.match_count = 0
         self.matched_paths = set()
@@ -261,6 +263,13 @@ class SearchPanel(QWidget):
         context_layout.addWidget(self.context)
         splitter.addWidget(results_pane); splitter.addWidget(context_pane); splitter.setSizes([550, 650])
         layout.addWidget(splitter, 1)
+        result_actions = QHBoxLayout()
+        open_selected = QPushButton("Open selected")
+        open_selected.clicked.connect(self.open_selected_result)
+        copy_path = QPushButton("Copy selected path")
+        copy_path.clicked.connect(self.copy_selected_path)
+        result_actions.addWidget(open_selected); result_actions.addWidget(copy_path); result_actions.addStretch()
+        layout.addLayout(result_actions)
         self.status = QLabel("Ready. Searches are on demand; no Windows index is used.")
         layout.addWidget(self.status)
         tabs.addTab(search_page, "Search")
@@ -326,6 +335,31 @@ class SearchPanel(QWidget):
         if not 0 <= index < self.results.count():
             return False
         self.results.setCurrentRow(index)
+        return True
+
+    def _selected_match(self):
+        selected = self.results.selectedItems()
+        return selected[0].data(Qt.ItemDataRole.UserRole) if selected else None
+
+    def copy_selected_path(self):
+        match = self._selected_match()
+        if not match:
+            return False
+        QApplication.clipboard().setText(match["path"])
+        self._set_status("Copied selected path.")
+        return True
+
+    def open_selected_result(self):
+        match = self._selected_match()
+        if not match or not Path(match["path"]).exists():
+            return False
+        path = match["path"]
+        if sys.platform == "win32":
+            os.startfile(path)
+        elif sys.platform == "darwin":
+            os.system(f'open "{path}"')
+        else:
+            os.system(f'xdg-open "{path}"')
         return True
 
     def submit_search(self, query=None):
@@ -416,7 +450,7 @@ class SearchPanel(QWidget):
             self._set_status("Enter search text and select a profile.")
             return
         self._save_visible_options()
-        self.results.clear(); self.context.clear(); self.match_count = 0; self.matched_paths = set(); self.search_button.setEnabled(False)
+        self.results.clear(); self.context.clear(); self.match_count = 0; self.matched_paths = set(); self.search_error = ""; self.search_button.setEnabled(False)
         self._set_status("Searching selected roots…")
         threading.Thread(target=self._search_worker, args=(query, profile.copy(), self.config.copy()), daemon=True).start()
 
@@ -425,22 +459,26 @@ class SearchPanel(QWidget):
             for match in rg_search.search(query, profile, config):
                 self.signals.result.emit(match)
         except Exception as exc:
-            self.signals.log.emit(f"Search failed: {exc}")
+            self.signals.failed.emit(str(exc))
         finally:
             self.signals.done.emit()
 
     def _add_result(self, match):
         self.match_count += 1
         self.matched_paths.add(match["path"])
-        item = QListWidgetItem(f"{match['path']}:{match['line']}:{match['column']}  {match['text']}")
+        location = f" ({match['location']})" if match.get("location") else ""
+        item = QListWidgetItem(f"{match['path']}{location}:{match['line']}:{match['column']}  {match['text']}")
         item.setData(Qt.ItemDataRole.UserRole, match)
         self.results.addItem(item)
 
     def _show_context(self):
-        selected = self.results.selectedItems()
-        if not selected:
+        match = self._selected_match()
+        if not match:
             return
-        match = selected[0].data(Qt.ItemDataRole.UserRole)
+        if match.get("preview"):
+            location = match.get("location", "document")
+            self.context.setPlainText(f"{match['path']} — {location}\n\n{match['preview']}")
+            return
         path = Path(match["path"])
         try:
             lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -453,9 +491,14 @@ class SearchPanel(QWidget):
     def _set_status(self, message):
         self.status.setText(message)
 
+    def _search_failed(self, message):
+        self.search_error = message
+        self._set_status(f"Search failed: {message}")
+
     def _finish_search(self):
         self.search_button.setEnabled(True)
-        self._set_status(f"Complete: {self.match_count:,} matching lines in {len(self.matched_paths):,} files.")
+        if not self.search_error:
+            self._set_status(f"Complete: {self.match_count:,} matching lines in {len(self.matched_paths):,} files.")
 
 
 # ── Archive Panel ─────────────────────────────────────────────────────────────
@@ -929,7 +972,16 @@ def main():
     parser.add_argument("--tray", action="store_true", help="Start minimised to tray")
     parser.add_argument("--page", choices=("files", "search", "archive", "training", "ai", "settings"),
                         help="Open a named dashboard page at startup")
+    parser.add_argument("--self-test", action="store_true", help="Verify bundled Search runtime dependencies and exit")
     args = parser.parse_args()
+
+    if args.self_test:
+        if not rg_search.locate_rg({}):
+            raise RuntimeError("Bundled ripgrep was not found")
+        import pymupdf  # noqa: F401
+        import docx  # noqa: F401
+        import pptx  # noqa: F401
+        return
 
     app = QApplication(sys.argv)
     app.setApplicationName("RDC Dashboard")

@@ -1,10 +1,13 @@
 # -*- mode: python ; coding: utf-8 -*-
 # PyInstaller spec — shared across Windows, Mac, Linux
-import sys, os
+import sys, os, shutil
 
 block_cipher = None
 SRC = os.path.join(os.path.dirname(SPECPATH), 'src')
 ASSETS = os.path.join(os.path.dirname(SPECPATH), 'assets')
+RG = os.environ.get('RIPGREP_PATH') or shutil.which('rg.exe') or shutil.which('rg')
+if not RG:
+    raise RuntimeError('ripgrep is required to build the portable Search feature; set RIPGREP_PATH or add rg.exe to PATH.')
 
 a = Analysis(
     [os.path.join(SRC, 'rdc_dashboard.py')],
@@ -13,6 +16,7 @@ a = Analysis(
     datas=[
         (os.path.join(ASSETS, 'icon.png'), 'assets'),
         (os.path.join(os.path.dirname(SPECPATH), 'rg-search.default.json'), '.'),
+        (RG, 'bin'),
     ],
     hiddenimports=[
         'mru_manager',
@@ -27,6 +31,9 @@ a = Analysis(
         'PyQt6.QtGui',
         'PyQt6.QtNetwork',
         'PyQt6.sip',
+        'fitz',
+        'docx',
+        'pptx',
     ],
     hookspath=[],
     hooksconfig={},

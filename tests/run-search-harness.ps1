@@ -26,7 +26,7 @@ $env:QT_QPA_PLATFORM = 'offscreen'
 & $python $harness *>> $report
 $exitCode = $LASTEXITCODE
 $content = Get-Content -LiteralPath $report -Raw
-$passed = $exitCode -eq 0 -and $content -match 'SEARCH_UI_HARNESS_OK tests_run=20'
+$passed = $exitCode -eq 0 -and $content -match 'SEARCH_UI_HARNESS_OK tests_run=(?:2[0-9]|[3-9][0-9])'
 $status = if ($passed) { 'PASS' } else { 'FAIL' }
 "`nRESULT: $status`nExit code: $exitCode`nReport: $report" | Add-Content -LiteralPath $report -Encoding utf8
 Copy-Item -LiteralPath $report -Destination $latest -Force

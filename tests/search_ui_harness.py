@@ -35,7 +35,7 @@ APP = None
 SUPPORTED_GLOBS = (
     "*.md", "*.mdx", "*.txt", "*.ts", "*.tsx", "*.js", "*.jsx", "*.mjs", "*.cjs",
     "*.py", "*.ps1", "*.psm1", "*.psd1", "*.json", "*.yaml", "*.yml", "*.toml",
-    "*.sql", "*.html", "*.css", "*.scss", "*.xml",
+    "*.sql", "*.html", "*.css", "*.scss", "*.xml", "*.pdf", "*.docx", "*.pptx",
 )
 
 
@@ -88,7 +88,20 @@ class PortableSearchHarness(unittest.TestCase):
         (self.root / "deep" / "below.md").write_text("needle deep\n", encoding="utf-8")
         for pattern in SUPPORTED_GLOBS:
             extension = pattern.removeprefix("*")
+            if extension in rg_search.DOCUMENT_SUFFIXES:
+                continue
             (self.root / f"type-probe{extension}").write_text("typeprobe\n", encoding="utf-8")
+        # Replace the three binary placeholders with actual documents the shipped extractor must read.
+        import pymupdf
+        from docx import Document
+        from pptx import Presentation
+        pdf = pymupdf.open(); page = pdf.new_page(); page.insert_text((72, 72), "typeprobe pdfneedle")
+        pdf.save(self.root / "type-probe.pdf"); pdf.close()
+        word = Document(); word.add_paragraph("typeprobe docxneedle"); word.save(self.root / "type-probe.docx")
+        deck = Presentation()
+        slide = deck.slides.add_slide(deck.slide_layouts[0])
+        slide.shapes.title.text = "typeprobe pptxneedle"
+        deck.save(self.root / "type-probe.pptx")
         self.config_path = self.root / "rg-search.json"
         self.write_config([default_profile("Harness", self.root)])
         self.settings_patch = patch.object(rdc_dashboard.mru, "search_config_path", lambda: self.config_path)
@@ -137,7 +150,7 @@ class PortableSearchHarness(unittest.TestCase):
         matches = self.search("needle")
         self.assertFalse(any("needlework" in match["text"] for match in matches))
 
-    def test_06_twenty_two_file_types_are_searchable(self):
+    def test_06_twenty_five_file_types_are_searchable(self):
         matches = self.search("typeprobe")
         found_extensions = {Path(match["path"]).suffix for match in matches}
         expected_extensions = {pattern.removeprefix("*") for pattern in SUPPORTED_GLOBS}
@@ -236,6 +249,32 @@ class PortableSearchHarness(unittest.TestCase):
         self.assertEqual(scroll.maximum(), scroll.value())
         scroll.setValue(scroll.minimum())
         self.assertEqual(scroll.minimum(), scroll.value())
+
+    def test_21_pdf_text_is_searchable_with_page_preview(self):
+        matches = self.search("pdfneedle")
+        self.assertEqual(1, len(matches))
+        self.assertEqual("page 1", matches[0]["location"])
+        self.assertTrue(self.panel.select_result(0))
+        self.assertIn("pdfneedle", self.panel.context.toPlainText())
+
+    def test_22_docx_text_is_searchable_with_document_preview(self):
+        matches = self.search("docxneedle")
+        self.assertEqual(1, len(matches))
+        self.assertEqual("document", matches[0]["location"])
+        self.assertTrue(self.panel.select_result(0))
+        self.assertIn("docxneedle", self.panel.context.toPlainText())
+
+    def test_23_pptx_text_is_searchable_with_slide_preview(self):
+        matches = self.search("pptxneedle")
+        self.assertEqual(1, len(matches))
+        self.assertEqual("slide 1", matches[0]["location"])
+        self.assertTrue(self.panel.select_result(0))
+        self.assertIn("pptxneedle", self.panel.context.toPlainText())
+
+    def test_24_existing_profile_is_upgraded_for_documents(self):
+        self.write_config([default_profile("Harness", self.root, include=("*.md",))])
+        self.panel.reload_settings()
+        self.assertTrue(all(pattern in self.panel._profile()["include"] for pattern in ("*.pdf", "*.docx", "*.pptx")))
 
 
 def main():
