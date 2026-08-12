@@ -7,8 +7,8 @@
       "pinned": true,
       "roots": ["C:\\Dev", "C:\\rdc-gdrive\\global-corpus"],
       "include": ["*.md", "*.mdx", "*.txt", "*.ts", "*.tsx", "*.js", "*.jsx", "*.mjs", "*.cjs", "*.py", "*.ps1", "*.psm1", "*.psd1", "*.json", "*.yaml", "*.yml", "*.toml", "*.sql", "*.html", "*.css", "*.scss", "*.xml", "*.pdf", "*.docx", "*.pptx"],
-      "exclude": ["**/.git/**", "**/node_modules/**", "**/.next/**", "**/.turbo/**", "**/dist/**", "**/build/**", "**/coverage/**", "**/.cache/**", "**/__pycache__/**", "**/.venv/**", "**/target/**", "**/bin/**", "**/obj/**", "**/*.wt/**", "**/_archive/**", "**/_scratch/**", "**/_tmp/**"],
-      "options": {"regex": false, "case_insensitive": true, "whole_word": false, "hidden": false, "follow_symlinks": false, "no_ignore": false, "max_depth": 0, "threads": 0, "max_matches_per_file": 100, "max_file_size": "10M"}
+      "exclude": ["**/.git/**", "**/node_modules/**", "**/.next/**", "**/.turbo/**", "**/dist/**", "**/build/**", "**/coverage/**", "**/.cache/**", "**/__pycache__/**", "**/.venv/**", "**/target/**", "**/bin/**", "**/obj/**", "**/*.wt/**", "**/_archive/**", "**/_working/**", "**/*temp*/**", "**/*tmp*/**", "**/_scratch/**", "**/_tmp/**"],
+      "options": {"regex": false, "case_insensitive": true, "whole_word": false, "hidden": false, "follow_symlinks": false, "no_ignore": false, "max_depth": 0, "threads": 0, "max_matches_per_file": 100, "max_total_results": 5000, "max_file_size": "10M"}
     }
   ]
 }

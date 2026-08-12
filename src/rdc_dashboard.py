@@ -18,7 +18,7 @@ from PyQt6.QtWidgets import (
     QStackedWidget, QPushButton, QLabel, QLineEdit, QTextEdit,
     QFileDialog, QCheckBox, QProgressBar, QListWidget, QListWidgetItem,
     QTreeView, QSplitter, QTabWidget, QComboBox, QAbstractItemView,
-    QSystemTrayIcon, QMenu, QSizePolicy, QFrame, QSpinBox, QMessageBox,
+    QSystemTrayIcon, QMenu, QSizePolicy, QFrame, QSpinBox, QMessageBox, QTreeWidget, QTreeWidgetItem,
 )
 from PyQt6.QtCore import (
     Qt, QDir, QModelIndex, pyqtSignal, QObject, QThread,
@@ -43,8 +43,8 @@ QPushButton#nav_btn           { text-align: left; padding: 10px 16px; border: no
 QPushButton#nav_btn:checked   { background: #2a6496; color: #fff; border-left: 3px solid #5bc0de; }
 QPushButton#nav_btn:hover     { background: #333; }
 QLineEdit, QTextEdit          { background: #2d2d2d; border: 1px solid #555; border-radius: 4px; padding: 4px; color: #d4d4d4; }
-QListWidget, QTreeView        { background: #252525; border: 1px solid #444; alternate-background-color: #2a2a2a; }
-QListWidget::item:selected, QTreeView::item:selected { background: #2a6496; }
+QListWidget, QTreeView, QTreeWidget { background: #252525; border: 1px solid #444; alternate-background-color: #2a2a2a; }
+QListWidget::item:selected, QTreeView::item:selected, QTreeWidget::item:selected { background: #2a6496; }
 QTabWidget::pane              { border: 1px solid #444; }
 QTabBar::tab                  { background: #2d2d2d; color: #aaa; padding: 6px 14px; border: 1px solid #444; }
 QTabBar::tab:selected         { background: #1e1e1e; color: #d4d4d4; border-bottom: none; }
@@ -58,6 +58,25 @@ QLabel#section_title          { font-size: 15px; font-weight: bold; color: #5bc0
 QFrame#divider                { color: #444; }
 """
 
+LIGHT_QSS = """
+QMainWindow, QWidget          { background: #f7f9fc; color: #18212f; font-family: Segoe UI, Arial; font-size: 13px; }
+QPushButton                   { background: #ffffff; color: #18212f; border: 1px solid #b9c4d1; border-radius: 4px; padding: 5px 12px; }
+QPushButton:hover             { background: #e9f2fb; }
+QPushButton:pressed           { background: #b9dcf7; }
+QPushButton#nav_btn           { text-align: left; padding: 10px 16px; border: none; border-radius: 0; font-size: 13px; }
+QPushButton#nav_btn:checked   { background: #d8ecfc; color: #123a58; border-left: 3px solid #1774b7; }
+QLineEdit, QTextEdit          { background: #ffffff; border: 1px solid #aebdcb; border-radius: 4px; padding: 4px; color: #18212f; }
+QListWidget, QTreeView, QTreeWidget { background: #ffffff; border: 1px solid #b9c4d1; alternate-background-color: #f1f5f9; }
+QListWidget::item:selected, QTreeView::item:selected, QTreeWidget::item:selected { background: #cfe8fb; color: #12243a; }
+QTabWidget::pane              { border: 1px solid #b9c4d1; }
+QTabBar::tab                  { background: #e8edf3; color: #425466; padding: 6px 14px; border: 1px solid #b9c4d1; }
+QTabBar::tab:selected         { background: #ffffff; color: #18212f; border-bottom: none; }
+QComboBox                     { background: #ffffff; border: 1px solid #aebdcb; border-radius: 4px; padding: 4px; }
+QScrollBar:vertical           { background: #edf2f7; width: 10px; }
+QScrollBar::handle:vertical   { background: #8da2b8; border-radius: 4px; min-height: 20px; }
+QLabel#section_title          { font-size: 15px; font-weight: bold; color: #1769aa; padding: 8px 0 4px 0; }
+"""
+
 
 # ── Worker signals ───────────────────────────────────────────────────────────
 class WorkerSignals(QObject):
@@ -65,6 +84,16 @@ class WorkerSignals(QObject):
     failed = pyqtSignal(str)
     done   = pyqtSignal()
     result = pyqtSignal(object)
+
+
+class ZoomableContext(QTextEdit):
+    """Terminal-like context viewer: Ctrl+wheel changes text size without losing position."""
+    def wheelEvent(self, event):
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            self.zoomIn(1 if event.angleDelta().y() > 0 else -1)
+            event.accept()
+            return
+        super().wheelEvent(event)
 
 
 # ── Drag-drop file list ──────────────────────────────────────────────────────
@@ -188,12 +217,17 @@ class SearchPanel(QWidget):
         super().__init__(parent)
         self.config = mru.load_search_config()
         self.signals = WorkerSignals()
-        self.signals.result.connect(self._add_result)
+        self.signals.result.connect(self._add_results)
         self.signals.log.connect(self._set_status)
         self.signals.failed.connect(self._search_failed)
         self.signals.done.connect(self._finish_search)
         self.match_count = 0
         self.matched_paths = set()
+        self.result_items = []
+        self.result_matches = []
+        self.directory_items = {}
+        self.file_items = {}
+        self.cancel_event = None
 
         tabs = QTabWidget(self)
         outer = QVBoxLayout(self)
@@ -211,6 +245,10 @@ class SearchPanel(QWidget):
         self.search_button = QPushButton("▶ Search")
         self.search_button.clicked.connect(self.submit_search)
         query_row.addWidget(self.search_button)
+        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button.setEnabled(False)
+        self.cancel_button.clicked.connect(self.cancel_search)
+        query_row.addWidget(self.cancel_button)
         layout.addLayout(query_row)
 
         profile_row = QHBoxLayout()
@@ -246,22 +284,37 @@ class SearchPanel(QWidget):
         tuning.addWidget(QLabel("Max matches/file:"))
         self.max_matches = QSpinBox(); self.max_matches.setRange(1, 100000); self.max_matches.valueChanged.connect(self._save_visible_options)
         tuning.addWidget(self.max_matches)
+        tuning.addWidget(QLabel("Max total results:"))
+        self.max_total_results = QSpinBox(); self.max_total_results.setRange(1, 100000); self.max_total_results.setSingleStep(500); self.max_total_results.valueChanged.connect(self._save_visible_options)
+        tuning.addWidget(self.max_total_results)
         tuning.addStretch()
         layout.addLayout(tuning)
 
         self.scope = QLabel(); self.scope.setWordWrap(True); self.scope.setStyleSheet("color:#b7c2d0; padding: 4px 0;")
         layout.addWidget(self.scope)
-        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter = QSplitter(Qt.Orientation.Vertical)
         results_pane = QWidget(); results_layout = QVBoxLayout(results_pane); results_layout.setContentsMargins(0, 0, 0, 0)
-        results_layout.addWidget(QLabel("Matching lines"))
-        self.results = QListWidget(); self.results.itemSelectionChanged.connect(self._show_context)
+        results_layout.addWidget(QLabel("Matching directories — expand a directory, then a file, to inspect hits"))
+        self.results = QTreeWidget()
+        self.results.setHeaderLabels(["File", "Where", "Match preview"])
+        self.results.setRootIsDecorated(True)
+        self.results.setAlternatingRowColors(True)
+        self.results.setColumnWidth(0, 260)
+        self.results.setColumnWidth(1, 95)
+        self.results.itemSelectionChanged.connect(self._show_context)
         self.results.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         results_layout.addWidget(self.results)
         context_pane = QWidget(); context_layout = QVBoxLayout(context_pane); context_layout.setContentsMargins(0, 0, 0, 0)
         context_layout.addWidget(QLabel("Selected match context (±3 lines)"))
-        self.context = QTextEdit(); self.context.setReadOnly(True); self.context.setFont(QFont("Cascadia Mono", 10))
+        context_controls = QHBoxLayout()
+        zoom_out = QPushButton("A−"); zoom_out.clicked.connect(lambda: self.set_context_zoom(-1))
+        zoom_in = QPushButton("A+"); zoom_in.clicked.connect(lambda: self.set_context_zoom(1))
+        zoom_reset = QPushButton("Reset zoom"); zoom_reset.clicked.connect(self.reset_context_zoom)
+        context_controls.addWidget(zoom_out); context_controls.addWidget(zoom_in); context_controls.addWidget(zoom_reset); context_controls.addStretch()
+        context_layout.addLayout(context_controls)
+        self.context = ZoomableContext(); self.context.setReadOnly(True); self.context.setFont(QFont("Cascadia Mono", 10)); self.context_zoom = 0
         context_layout.addWidget(self.context)
-        splitter.addWidget(results_pane); splitter.addWidget(context_pane); splitter.setSizes([550, 650])
+        splitter.addWidget(results_pane); splitter.addWidget(context_pane); splitter.setSizes([520, 360])
         layout.addWidget(splitter, 1)
         result_actions = QHBoxLayout()
         open_selected = QPushButton("Open selected")
@@ -308,7 +361,7 @@ class SearchPanel(QWidget):
             "whole_word": self.whole_word, "hidden": self.hidden,
             "follow_symlinks": self.follow, "no_ignore": self.no_ignore,
             "max_depth": self.max_depth, "threads": self.threads,
-            "max_matches_per_file": self.max_matches,
+            "max_matches_per_file": self.max_matches, "max_total_results": self.max_total_results,
         }
         for key, value in options.items():
             control = controls.get(key)
@@ -332,28 +385,35 @@ class SearchPanel(QWidget):
         return True
 
     def select_result(self, index):
-        if not 0 <= index < self.results.count():
+        if not 0 <= index < len(self.result_items):
             return False
-        self.results.setCurrentRow(index)
+        item = self.result_items[index]
+        item.parent().setExpanded(True)
+        if item.parent().parent():
+            item.parent().parent().setExpanded(True)
+        self.results.setCurrentItem(item)
         return True
 
     def _selected_match(self):
         selected = self.results.selectedItems()
-        return selected[0].data(Qt.ItemDataRole.UserRole) if selected else None
+        return selected[0].data(0, Qt.ItemDataRole.UserRole) if selected else None
 
     def copy_selected_path(self):
         match = self._selected_match()
-        if not match:
+        selected = self.results.selectedItems()
+        path = match["path"] if match else (selected[0].data(0, Qt.ItemDataRole.UserRole + 1) if selected else None)
+        if not path:
             return False
-        QApplication.clipboard().setText(match["path"])
+        QApplication.clipboard().setText(path)
         self._set_status("Copied selected path.")
         return True
 
     def open_selected_result(self):
         match = self._selected_match()
-        if not match or not Path(match["path"]).exists():
+        selected = self.results.selectedItems()
+        path = match["path"] if match else (selected[0].data(0, Qt.ItemDataRole.UserRole + 1) if selected else None)
+        if not path or not Path(path).exists():
             return False
-        path = match["path"]
         if sys.platform == "win32":
             os.startfile(path)
         elif sys.platform == "darwin":
@@ -411,8 +471,9 @@ class SearchPanel(QWidget):
                    (self.follow, "follow_symlinks"), (self.no_ignore, "no_ignore"))
         for widget, key in widgets:
             widget.blockSignals(True); widget.setChecked(bool(options.get(key, False))); widget.blockSignals(False)
-        for widget, key in ((self.max_depth, "max_depth"), (self.threads, "threads"), (self.max_matches, "max_matches_per_file")):
-            widget.blockSignals(True); widget.setValue(int(options.get(key, 0 if key != "max_matches_per_file" else 100))); widget.blockSignals(False)
+        for widget, key in ((self.max_depth, "max_depth"), (self.threads, "threads"), (self.max_matches, "max_matches_per_file"), (self.max_total_results, "max_total_results")):
+            default = 5000 if key == "max_total_results" else (100 if key == "max_matches_per_file" else 0)
+            widget.blockSignals(True); widget.setValue(int(options.get(key, default))); widget.blockSignals(False)
         roots = profile.get("roots", [])
         includes = profile.get("include", [])
         excludes = profile.get("exclude", [])
@@ -433,7 +494,7 @@ class SearchPanel(QWidget):
                               "whole_word": self.whole_word.isChecked(), "hidden": self.hidden.isChecked(),
                               "follow_symlinks": self.follow.isChecked(), "no_ignore": self.no_ignore.isChecked(),
                               "max_depth": self.max_depth.value(), "threads": self.threads.value(),
-                              "max_matches_per_file": self.max_matches.value(),
+                              "max_matches_per_file": self.max_matches.value(), "max_total_results": self.max_total_results.value(),
                               "max_file_size": profile.get("options", {}).get("max_file_size", "10M")}
         mru.save_search_config(self.config)
         self.config_editor.setPlainText(json.dumps(self.config, indent=2, ensure_ascii=False))
@@ -450,30 +511,82 @@ class SearchPanel(QWidget):
             self._set_status("Enter search text and select a profile.")
             return
         self._save_visible_options()
-        self.results.clear(); self.context.clear(); self.match_count = 0; self.matched_paths = set(); self.search_error = ""; self.search_button.setEnabled(False)
+        self.results.clear(); self.context.clear(); self.match_count = 0; self.matched_paths = set(); self.search_error = ""; self.search_button.setEnabled(False); self.cancel_button.setEnabled(True)
+        self.result_items = []
+        self.result_matches = []
+        self.directory_items = {}
+        self.file_items = {}
+        self.cancel_event = threading.Event()
         self._set_status("Searching selected roots…")
-        threading.Thread(target=self._search_worker, args=(query, profile.copy(), self.config.copy()), daemon=True).start()
+        threading.Thread(target=self._search_worker, args=(query, profile.copy(), self.config.copy(), self.cancel_event), daemon=True).start()
 
-    def _search_worker(self, query, profile, config):
+    def cancel_search(self):
+        if self.cancel_event:
+            self.cancel_event.set()
+            self.cancel_button.setEnabled(False)
+            self._set_status("Cancelling search…")
+
+    def _search_worker(self, query, profile, config, cancel_event):
         try:
-            for match in rg_search.search(query, profile, config):
-                self.signals.result.emit(match)
+            batch = []
+            for match in rg_search.search(query, profile, config, cancel_event):
+                batch.append(match)
+                if len(batch) >= 100:
+                    self.signals.result.emit(batch)
+                    batch = []
+            if batch:
+                self.signals.result.emit(batch)
         except Exception as exc:
             self.signals.failed.emit(str(exc))
         finally:
             self.signals.done.emit()
 
+    def _add_results(self, matches):
+        for match in (matches if isinstance(matches, list) else [matches]):
+            self._add_result(match)
+
+    @staticmethod
+    def compact_path(path, max_parts=3):
+        parts = Path(path).parts
+        return str(Path(*parts[-max_parts:])) if len(parts) > max_parts else str(path)
+
     def _add_result(self, match):
         self.match_count += 1
         self.matched_paths.add(match["path"])
-        location = f" ({match['location']})" if match.get("location") else ""
-        item = QListWidgetItem(f"{match['path']}{location}:{match['line']}:{match['column']}  {match['text']}")
-        item.setData(Qt.ItemDataRole.UserRole, match)
-        self.results.addItem(item)
+        path = Path(match["path"])
+        directory_key = str(path.parent)
+        directory = self.directory_items.get(directory_key)
+        if directory is None:
+            directory = QTreeWidgetItem([self.compact_path(directory_key), "directory", ""])
+            directory.setData(0, Qt.ItemDataRole.UserRole + 1, directory_key)
+            directory.setToolTip(0, directory_key)
+            self.results.addTopLevelItem(directory)
+            self.directory_items[directory_key] = directory
+        parent = self.file_items.get(match["path"])
+        if parent is None:
+            parent = QTreeWidgetItem([path.name, "", ""])
+            parent.setData(0, Qt.ItemDataRole.UserRole + 1, match["path"])
+            parent.setToolTip(0, match["path"])
+            directory.addChild(parent)
+            self.file_items[match["path"]] = parent
+        location = match.get("location") or f"line {match['line']}"
+        preview = match["text"].strip().replace("\t", " ")
+        item = QTreeWidgetItem(["", location, preview])
+        item.setData(0, Qt.ItemDataRole.UserRole, match)
+        item.setToolTip(2, preview)
+        parent.addChild(item)
+        self.result_items.append(item)
+        self.result_matches.append(match)
+        parent.setText(1, f"{parent.childCount()} hit{'s' if parent.childCount() != 1 else ''}")
 
     def _show_context(self):
         match = self._selected_match()
         if not match:
+            selected = self.results.selectedItems()
+            if selected:
+                path = selected[0].data(0, Qt.ItemDataRole.UserRole + 1)
+                if path:
+                    self.context.setPlainText(f"{path}\n\nExpand this directory or file to choose a matching line.")
             return
         if match.get("preview"):
             location = match.get("location", "document")
@@ -491,14 +604,29 @@ class SearchPanel(QWidget):
     def _set_status(self, message):
         self.status.setText(message)
 
+    def set_context_zoom(self, amount):
+        self.context.zoomIn(int(amount))
+        self.context_zoom += int(amount)
+
+    def reset_context_zoom(self):
+        if self.context_zoom:
+            self.context.zoomIn(-self.context_zoom)
+            self.context_zoom = 0
+
     def _search_failed(self, message):
         self.search_error = message
         self._set_status(f"Search failed: {message}")
 
     def _finish_search(self):
         self.search_button.setEnabled(True)
+        self.cancel_button.setEnabled(False)
         if not self.search_error:
-            self._set_status(f"Complete: {self.match_count:,} matching lines in {len(self.matched_paths):,} files.")
+            if self.cancel_event and self.cancel_event.is_set():
+                self._set_status(f"Cancelled after {self.match_count:,} matching lines in {len(self.matched_paths):,} files.")
+            elif self.match_count >= self.max_total_results.value():
+                self._set_status(f"Showing first {self.match_count:,} matching lines in {len(self.matched_paths):,} files (limit reached).")
+            else:
+                self._set_status(f"Complete: {self.match_count:,} matching lines in {len(self.matched_paths):,} files.")
 
 
 # ── Archive Panel ─────────────────────────────────────────────────────────────
@@ -874,6 +1002,9 @@ class MainWindow(QMainWindow):
         logo = QLabel("  🏗 RDC Dashboard")
         logo.setStyleSheet("font-size:14px; font-weight:bold; color:#5bc0de; padding:16px 8px;")
         sidebar_layout.addWidget(logo)
+        self.theme_button = QPushButton()
+        self.theme_button.clicked.connect(self.toggle_theme)
+        sidebar_layout.addWidget(self.theme_button)
 
         self.stack = QStackedWidget()
         self.panels = [
@@ -904,6 +1035,7 @@ class MainWindow(QMainWindow):
 
         # Tray
         self._setup_tray()
+        self.set_theme(settings.get("theme", "dark"), persist=False)
         self._switch(0)
 
     def _switch(self, idx: int):
@@ -922,6 +1054,19 @@ class MainWindow(QMainWindow):
 
     def _on_settings_changed(self, new_settings: dict):
         self.settings.update(new_settings)
+
+    def set_theme(self, theme, persist=True):
+        """Public theme seam used by the toggle and functional tests."""
+        normalized = "light" if str(theme).casefold() == "light" else "dark"
+        QApplication.instance().setStyleSheet(LIGHT_QSS if normalized == "light" else DARK_QSS)
+        self.settings["theme"] = normalized
+        self.theme_button.setText("☾ Dark theme" if normalized == "light" else "☀ Light theme")
+        if persist:
+            mru.save_settings(self.settings)
+        return normalized
+
+    def toggle_theme(self):
+        return self.set_theme("light" if self.settings.get("theme") == "dark" else "dark")
 
     def _setup_tray(self):
         px = QPixmap(32, 32)
@@ -981,7 +1126,6 @@ def main():
 
     app = QApplication(sys.argv)
     app.setApplicationName("RDC Dashboard")
-    app.setStyleSheet(DARK_QSS)
     app.setQuitOnLastWindowClosed(False)
 
     settings = mru.load_settings()

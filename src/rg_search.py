@@ -78,7 +78,7 @@ def build_command(query: str, profile: dict, config: dict) -> list[str]:
     return command
 
 
-def _search_text(query: str, profile: dict, config: dict):
+def _search_text(query: str, profile: dict, config: dict, cancel_event=None):
     if not _text_patterns(profile):
         return
     command = build_command(query, profile, config)
@@ -88,6 +88,8 @@ def _search_text(query: str, profile: dict, config: dict):
     )
     try:
         for raw in process.stdout:
+            if cancel_event and cancel_event.is_set():
+                return
             try:
                 event = json.loads(raw)
             except json.JSONDecodeError:
@@ -131,6 +133,10 @@ def _is_hidden(path: Path) -> bool:
     return any(part.startswith(".") for part in path.parts)
 
 
+def _is_temporary(path: Path) -> bool:
+    return any("temp" in part.lower() or "tmp" in part.lower() for part in path.parts)
+
+
 def _document_files(profile: dict):
     patterns = _document_patterns(profile)
     if not patterns:
@@ -149,14 +155,14 @@ def _document_files(profile: dict):
             relative_dir = current.relative_to(root)
             dirs[:] = [
                 name for name in dirs
-                if name != ".git"
+                if name != ".git" and not _is_temporary(relative_dir / name)
                 and (include_hidden or not _is_hidden(relative_dir / name))
                 and not _excluded(relative_dir / name, exclusions)
                 and (not max_depth or len((relative_dir / name).parts) <= max_depth)
             ]
             for name in files:
                 relative = relative_dir / name
-                if (not include_hidden and _is_hidden(relative)) or _excluded(relative, exclusions):
+                if _is_temporary(relative) or (not include_hidden and _is_hidden(relative)) or _excluded(relative, exclusions):
                     continue
                 if max_depth and len(relative.parts) - 1 > max_depth:
                     continue
@@ -205,16 +211,22 @@ def _query_pattern(query: str, options: dict):
     return re.compile(expression, re.I if options.get("case_insensitive", True) else 0)
 
 
-def _search_documents(query: str, profile: dict):
+def _search_documents(query: str, profile: dict, cancel_event=None):
     options = profile.get("options", {})
     pattern = _query_pattern(query, options)
     per_file = int(options.get("max_matches_per_file", 100))
     for path in _document_files(profile):
+        if cancel_event and cancel_event.is_set():
+            return
         try:
             emitted = 0
             for location, section in _document_sections(path):
+                if cancel_event and cancel_event.is_set():
+                    return
                 lines = section.splitlines() or [section]
                 for index, line in enumerate(lines, 1):
+                    if cancel_event and cancel_event.is_set():
+                        return
                     found = pattern.search(line)
                     if not found:
                         continue
@@ -237,7 +249,14 @@ def _search_documents(query: str, profile: dict):
             continue
 
 
-def search(query: str, profile: dict, config: dict):
+def search(query: str, profile: dict, config: dict, cancel_event=None):
     """Yield normalized text and document matches using one profile contract."""
-    yield from _search_text(query, profile, config)
-    yield from _search_documents(query, profile)
+    remaining = int(profile.get("options", {}).get("max_total_results", 5000))
+    for source in (_search_text(query, profile, config, cancel_event), _search_documents(query, profile, cancel_event)):
+        for match in source:
+            if cancel_event and cancel_event.is_set():
+                return
+            yield match
+            remaining -= 1
+            if remaining <= 0:
+                return

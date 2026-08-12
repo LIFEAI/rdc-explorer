@@ -57,6 +57,7 @@ def default_profile(name, root, include=SUPPORTED_GLOBS, exclude=("**/node_modul
             "regex": False, "case_insensitive": True, "whole_word": False,
             "hidden": False, "follow_symlinks": False, "no_ignore": False,
             "max_depth": 0, "threads": 0, "max_matches_per_file": 100,
+            "max_total_results": 5000,
             "max_file_size": "10M",
         },
     }
@@ -84,6 +85,8 @@ class PortableSearchHarness(unittest.TestCase):
         (self.root / ".hidden.md").write_text("hiddenneedle\n", encoding="utf-8")
         (self.root / "node_modules").mkdir()
         (self.root / "node_modules" / "skip.md").write_text("needle skipped\n", encoding="utf-8")
+        (self.root / "_working").mkdir()
+        (self.root / "_working" / "skip.md").write_text("needle skipped working\n", encoding="utf-8")
         (self.root / "deep").mkdir()
         (self.root / "deep" / "below.md").write_text("needle deep\n", encoding="utf-8")
         for pattern in SUPPORTED_GLOBS:
@@ -125,7 +128,7 @@ class PortableSearchHarness(unittest.TestCase):
     def search(self, query="needle"):
         self.panel.submit_search(query)
         wait_until(lambda: self.panel.search_button.isEnabled())
-        return [self.panel.results.item(i).data(256) for i in range(self.panel.results.count())]
+        return list(self.panel.result_matches)
 
     # 01–06: text interpretation and file selection.
     def test_01_literal_search_uses_fixed_strings(self):
@@ -158,8 +161,10 @@ class PortableSearchHarness(unittest.TestCase):
 
     # 07–13: scope and every search modifier/tuning control.
     def test_07_exclude_glob_omits_node_modules(self):
+        self.panel._profile()["exclude"].append("**/_working/**")
         matches = self.search("needle")
         self.assertFalse(any("node_modules" in match["path"] for match in matches))
+        self.assertFalse(any("_working" in match["path"] for match in matches))
 
     def test_08_include_hidden_adds_hidden_flag(self):
         self.panel.set_search_options(hidden=True)
@@ -243,6 +248,8 @@ class PortableSearchHarness(unittest.TestCase):
         self.panel._profile()["include"] = ["*.md"]
         matches = self.search("surface")
         self.assertGreaterEqual(len(matches), 500)
+        self.panel.results.expandAll()
+        QApplication.processEvents()
         scroll = self.panel.results.verticalScrollBar()
         self.assertGreater(scroll.maximum(), 0)
         scroll.setValue(scroll.maximum())
@@ -278,6 +285,36 @@ class PortableSearchHarness(unittest.TestCase):
 
     def test_25_search_runtime_dependencies_execute(self):
         self.assertTrue(Path(rg_search.runtime_self_test()["rg"]).is_file())
+
+    def test_26_existing_profile_is_upgraded_to_exclude_working(self):
+        self.write_config([default_profile("Harness", self.root, exclude=("**/.git/**",))])
+        self.panel.reload_settings()
+        self.assertIn("**/_working/**", self.panel._profile()["exclude"])
+
+    def test_27_temp_and_tmp_directories_are_always_excluded(self):
+        temp_dir = self.root / "temporary-build"; temp_dir.mkdir()
+        tmp_dir = self.root / "tmp-output"; tmp_dir.mkdir()
+        (temp_dir / "leak.md").write_text("needle should not appear\n", encoding="utf-8")
+        (tmp_dir / "leak.md").write_text("needle should not appear\n", encoding="utf-8")
+        matches = self.search("needle")
+        self.assertFalse(any("temporary-build" in match["path"] or "tmp-output" in match["path"] for match in matches))
+
+    def test_28_global_result_cap_bounds_memory_and_reports_limit(self):
+        self.panel.set_search_options(max_total_results=3)
+        matches = self.search("needle")
+        self.assertEqual(3, len(matches))
+        self.assertIn("limit reached", self.panel.status.text())
+
+    def test_29_context_zoom_is_controllable_without_mouse_automation(self):
+        baseline = self.panel.context_zoom
+        self.panel.set_context_zoom(2)
+        self.assertEqual(baseline + 2, self.panel.context_zoom)
+        self.panel.reset_context_zoom()
+        self.assertEqual(0, self.panel.context_zoom)
+
+    def test_30_both_high_contrast_theme_palettes_are_shipped(self):
+        self.assertIn("background: #1e1e1e", rdc_dashboard.DARK_QSS)
+        self.assertIn("background: #f7f9fc", rdc_dashboard.LIGHT_QSS)
 
 
 def main():

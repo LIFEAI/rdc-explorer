@@ -11,6 +11,7 @@ from pathlib import Path
 APP_NAME = "RDC_Dashboard"
 MAX_MRU = 20
 DOCUMENT_SEARCH_PATTERNS = ("*.pdf", "*.docx", "*.pptx")
+REQUIRED_SEARCH_EXCLUSIONS = ("**/_working/**", "**/*temp*/**", "**/*tmp*/**")
 
 
 def _config_dir() -> Path:
@@ -52,6 +53,12 @@ def load_search_config() -> dict:
             if pattern not in included:
                 included.append(pattern)
                 changed = True
+        exclusions = profile.setdefault("exclude", [])
+        for pattern in REQUIRED_SEARCH_EXCLUSIONS:
+            if pattern not in exclusions:
+                exclusions.append(pattern)
+                changed = True
+        profile.setdefault("options", {}).setdefault("max_total_results", 5000)
     if changed:
         save_search_config(config)
     return config
