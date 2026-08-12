@@ -51,21 +51,28 @@ def search(query: str, profile: dict, config: dict):
         command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True, encoding="utf-8", errors="replace", creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
-    for raw in process.stdout:
-        try:
-            event = json.loads(raw)
-        except json.JSONDecodeError:
-            continue
-        if event.get("type") != "match":
-            continue
-        data = event["data"]
-        yield {
-            "path": data["path"]["text"],
-            "line": data["line_number"],
-            "text": data["lines"]["text"].rstrip("\r\n"),
-            "column": data.get("submatches", [{}])[0].get("start", 0) + 1,
-        }
-    stderr = process.stderr.read().strip()
-    code = process.wait()
-    if code > 1:
-        raise RuntimeError(stderr or f"ripgrep exited with code {code}")
+    try:
+        for raw in process.stdout:
+            try:
+                event = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if event.get("type") != "match":
+                continue
+            data = event["data"]
+            yield {
+                "path": data["path"]["text"],
+                "line": data["line_number"],
+                "text": data["lines"]["text"].rstrip("\r\n"),
+                "column": data.get("submatches", [{}])[0].get("start", 0) + 1,
+            }
+        stderr = process.stderr.read().strip()
+        code = process.wait()
+        if code > 1:
+            raise RuntimeError(stderr or f"ripgrep exited with code {code}")
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+        process.stdout.close()
+        process.stderr.close()

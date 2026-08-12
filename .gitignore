@@ -21,6 +21,7 @@ Thumbs.db
 settings.json
 mru.json
 *.log
+test-results/
 
 # Editor
 .vscode/
