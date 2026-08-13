@@ -231,6 +231,7 @@ class FilePanel(QWidget):
         self.search_generation = 0
         self.search_cancel = None
         self.tree_matches = {}
+        self.roots = self._settings_roots(settings)
         self.signals = WorkerSignals()
         self.signals.result.connect(self._add_tree_matches)
         self.signals.failed.connect(self._tree_search_failed)
@@ -253,18 +254,17 @@ class FilePanel(QWidget):
         search_row.addWidget(self.tree_status)
         layout.addLayout(search_row)
 
-        top = QSplitter(Qt.Orientation.Horizontal)
-
-        # Left: persistent pins.
-        pins = QWidget()
-        pv = QVBoxLayout(pins)
-        pv.setContentsMargins(0, 0, 0, 0)
-        label = QLabel("Pinned locations"); label.setObjectName("section_title")
-        pv.addWidget(label)
+        # One navigation column: roots, pins, then folders/files.  The preview
+        # deliberately remains below it, so a line preview never competes sideways.
+        navigation = QWidget()
+        nv = QVBoxLayout(navigation)
+        nv.setContentsMargins(0, 0, 0, 0)
+        label = QLabel("Locations"); label.setObjectName("section_title")
+        nv.addWidget(label)
         self.pins = PinTree()
         self.pins.pin_paths_dropped.connect(self.pin_paths)
         self.pins.location_activated.connect(self.open_pinned)
-        pv.addWidget(self.pins)
+        nv.addWidget(self.pins)
         pin_actions = QHBoxLayout()
         self.pin_selected_button = QPushButton("Pin selected")
         self.pin_selected_button.clicked.connect(self.pin_selected)
@@ -272,15 +272,12 @@ class FilePanel(QWidget):
         self.unpin_button = QPushButton("Unpin")
         self.unpin_button.clicked.connect(self.unpin_selected)
         pin_actions.addWidget(self.unpin_button)
-        pv.addLayout(pin_actions)
+        pin_actions.addStretch()
+        nv.addLayout(pin_actions)
         self._refresh_pins()
 
-        # Right: live filesystem tree or a tree of search-result folders.
-        files = QWidget()
-        fv = QVBoxLayout(files)
-        fv.setContentsMargins(0, 0, 0, 0)
         label = QLabel("Folders and files"); label.setObjectName("section_title")
-        fv.addWidget(label)
+        nv.addWidget(label)
         self.model = QFileSystemModel()
         self.model.setRootPath(QDir.rootPath())
         self.tree = NavigableFileTree()
@@ -288,7 +285,7 @@ class FilePanel(QWidget):
         self.tree.setDragEnabled(True)
         self.tree.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
         self.tree.hideColumn(1); self.tree.hideColumn(2); self.tree.hideColumn(3)
-        root = settings.get("rdc2_root", "")
+        root = self.roots[0] if self.roots else ""
         self.current_root = root if root and os.path.isdir(root) else QDir.rootPath()
         self.tree.setRootIndex(self.model.index(self.current_root))
         self.tree.doubleClicked.connect(self._open_file)
@@ -300,14 +297,11 @@ class FilePanel(QWidget):
         self.tree_stack = QStackedWidget()
         self.tree_stack.addWidget(self.tree)
         self.tree_stack.addWidget(self.search_results)
-        fv.addWidget(self.tree_stack)
+        nv.addWidget(self.tree_stack, 1)
 
         btn_open = QPushButton("Open active folder in Explorer")
         btn_open.clicked.connect(self._open_explorer)
-        fv.addWidget(btn_open)
-        top.addWidget(pins)
-        top.addWidget(files)
-        top.setSizes([320, 880])
+        nv.addWidget(btn_open)
 
         preview = QWidget()
         vv = QVBoxLayout(preview)
@@ -328,10 +322,27 @@ class FilePanel(QWidget):
         vv.addWidget(self.preview)
 
         splitter = QSplitter(Qt.Orientation.Vertical)
-        splitter.addWidget(top)
+        splitter.addWidget(navigation)
         splitter.addWidget(preview)
         splitter.setSizes([440, 320])
         layout.addWidget(splitter)
+
+    @staticmethod
+    def _settings_roots(settings):
+        configured = settings.get("root_folders", [])
+        if isinstance(configured, str):
+            configured = [configured]
+        fallback = settings.get("rdc2_root", "")
+        paths = configured or ([fallback] if fallback else [])
+        return list(dict.fromkeys(os.path.normpath(path) for path in paths if path and os.path.isdir(path)))
+
+    def apply_settings(self, settings):
+        """Refresh the live root menu after Settings saves, without reopening the app."""
+        self.settings = settings
+        self.roots = self._settings_roots(settings)
+        if self.current_root not in self.roots and self.roots:
+            self.open_pinned(self.roots[0])
+        self._refresh_pins()
 
     def _open_file(self, idx: QModelIndex):
         path = self.model.filePath(idx)
@@ -356,6 +367,14 @@ class FilePanel(QWidget):
 
     def _refresh_pins(self):
         self.pins.clear()
+        roots = QTreeWidgetItem(["Root folders"])
+        roots.setFlags(roots.flags() & ~Qt.ItemFlag.ItemIsDragEnabled)
+        self.pins.addTopLevelItem(roots)
+        for path in self.roots:
+            item = QTreeWidgetItem([Path(path).name or path])
+            item.setData(0, Qt.ItemDataRole.UserRole, path)
+            item.setToolTip(0, path)
+            roots.addChild(item)
         folders = QTreeWidgetItem(["Pinned folders"])
         folders.setFlags(folders.flags() & ~Qt.ItemFlag.ItemIsDragEnabled)
         self.pins.addTopLevelItem(folders)
@@ -1340,14 +1359,29 @@ class SettingsPanel(QWidget):
         lbl = QLabel("Settings"); lbl.setObjectName("section_title")
         layout.addWidget(lbl)
 
-        # RDC2 Root
-        layout.addWidget(QLabel("RDC2 Root Folder:"))
+        # Roots power the collapsible Root folders section in Files.
+        layout.addWidget(QLabel("Root folders"))
+        layout.addWidget(QLabel("Each root appears as a collapsible location in Files."))
+        self.roots_list = QListWidget()
+        roots = settings.get("root_folders", []) or ([settings.get("rdc2_root", "")] if settings.get("rdc2_root", "") else [])
+        for path in dict.fromkeys(path for path in roots if path):
+            self.roots_list.addItem(path)
+        self.roots_list.setMinimumHeight(110)
+        layout.addWidget(self.roots_list)
         row = QHBoxLayout()
-        self.root_edit = QLineEdit(settings.get("rdc2_root", ""))
-        row.addWidget(self.root_edit)
-        btn_b = QPushButton("Browse…")
+        self.root_edit = QLineEdit()
+        self.root_edit.setPlaceholderText("Folder path to add")
+        self.root_edit.returnPressed.connect(self.add_root)
+        row.addWidget(self.root_edit, 1)
+        btn_b = QPushButton("Browse and add…")
         btn_b.clicked.connect(self._browse_root)
         row.addWidget(btn_b)
+        btn_add = QPushButton("Add root")
+        btn_add.clicked.connect(self.add_root)
+        row.addWidget(btn_add)
+        btn_remove = QPushButton("Remove selected")
+        btn_remove.clicked.connect(self.remove_selected_root)
+        row.addWidget(btn_remove)
         layout.addLayout(row)
 
         # API Keys
@@ -1390,12 +1424,36 @@ class SettingsPanel(QWidget):
         layout.addStretch()
 
     def _browse_root(self):
-        d = QFileDialog.getExistingDirectory(self, "Select RDC2 Root", self.root_edit.text())
+        d = QFileDialog.getExistingDirectory(self, "Select root folder", self.root_edit.text())
         if d:
             self.root_edit.setText(d)
+            self.add_root()
+
+    def root_folders(self):
+        return [self.roots_list.item(index).text() for index in range(self.roots_list.count())]
+
+    def add_root(self, path=None):
+        candidate = os.path.normpath(path or self.root_edit.text().strip())
+        if not candidate:
+            return False
+        if candidate in self.root_folders():
+            self.root_edit.clear()
+            return False
+        self.roots_list.addItem(candidate)
+        self.root_edit.clear()
+        return True
+
+    def remove_selected_root(self):
+        row = self.roots_list.currentRow()
+        if row >= 0:
+            self.roots_list.takeItem(row)
+            return True
+        return False
 
     def _save(self):
-        self.settings["rdc2_root"] = self.root_edit.text()
+        roots = self.root_folders()
+        self.settings["root_folders"] = roots
+        self.settings["rdc2_root"] = roots[0] if roots else ""
         self.settings["api_keys"] = {
             "anthropic": self.anthropic_key.text(),
             "openai":    self.openai_key.text(),
@@ -1498,6 +1556,8 @@ class MainWindow(QMainWindow):
 
     def _on_settings_changed(self, new_settings: dict):
         self.settings.update(new_settings)
+        files_panel = next(panel for label, panel in self.panels if label.endswith("Files"))
+        files_panel.apply_settings(self.settings)
 
     def set_theme(self, theme, persist=True):
         """Public theme seam used by the toggle and functional tests."""

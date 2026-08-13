@@ -32,7 +32,7 @@ from PyQt6.QtGui import QDropEvent
 
 import rdc_dashboard
 import rg_search
-from rdc_dashboard import SearchPanel, FilePanel
+from rdc_dashboard import SearchPanel, FilePanel, SettingsPanel
 
 APP = None
 SUPPORTED_GLOBS = (
@@ -124,7 +124,7 @@ class PortableSearchHarness(unittest.TestCase):
         self.panel = SearchPanel()
         self.panel.resize(1280, 820)
         self.panel.show()
-        self.files = FilePanel({"rdc2_root": str(self.root)})
+        self.files = FilePanel({"rdc2_root": str(self.root), "root_folders": [str(self.root)]})
         self.files.resize(1280, 820)
         self.files.show()
         QApplication.processEvents()
@@ -482,8 +482,8 @@ class PortableSearchHarness(unittest.TestCase):
         self.files.pin_paths([str(self.root / "notes.md"), str(self.root / "deep")])
         self.assertIn(str(self.root / "notes.md"), rdc_dashboard.mru.get_pinned_files())
         self.assertIn(str(self.root / "deep"), rdc_dashboard.mru.get_pinned_folders())
-        self.assertEqual(self.files.pins.topLevelItem(0).childCount(), 1)
         self.assertEqual(self.files.pins.topLevelItem(1).childCount(), 1)
+        self.assertEqual(self.files.pins.topLevelItem(2).childCount(), 1)
 
     def test_53_dragged_pin_navigates_the_live_tree_without_file_move(self):
         self.files.pin_paths([str(self.root / "deep")])
@@ -523,7 +523,7 @@ class PortableSearchHarness(unittest.TestCase):
     def test_58_unpin_removes_the_location_from_the_file_tree(self):
         target = str(self.root / "notes.md")
         self.files.pin_paths([target])
-        item = self.files.pins.topLevelItem(1).child(0)
+        item = self.files.pins.topLevelItem(2).child(0)
         self.files.pins.setCurrentItem(item)
         self.files.unpin_selected()
         self.assertNotIn(target, rdc_dashboard.mru.get_pinned_files())
@@ -537,6 +537,30 @@ class PortableSearchHarness(unittest.TestCase):
         self.files.pins.dropEvent(event)
         self.assertIn(str(target), rdc_dashboard.mru.get_pinned_files())
         self.assertTrue(target.is_file())
+
+    def test_60_multiple_roots_are_collapsible_locations_in_the_one_navigation_pane(self):
+        other = self.root / "other-root"
+        other.mkdir()
+        self.files.apply_settings({"rdc2_root": str(self.root), "root_folders": [str(self.root), str(other)]})
+        roots = self.files.pins.topLevelItem(0)
+        self.assertEqual("Root folders", roots.text(0))
+        self.assertEqual(2, roots.childCount())
+        self.assertTrue(roots.isExpanded())
+        self.assertEqual(self.files.pins.parentWidget(), self.files.tree_stack.parentWidget())
+
+    def test_61_settings_root_list_add_remove_and_save_are_directly_controllable(self):
+        other = self.root / "settings-root"
+        other.mkdir()
+        settings = {"rdc2_root": str(self.root), "root_folders": [str(self.root)], "api_keys": {}, "theme": "dark", "window": {}}
+        panel = SettingsPanel(settings)
+        self.addCleanup(panel.close)
+        self.assertTrue(panel.add_root(str(other)))
+        self.assertEqual([str(self.root), str(other)], panel.root_folders())
+        panel._save()
+        self.assertEqual([str(self.root), str(other)], settings["root_folders"])
+        panel.roots_list.setCurrentRow(1)
+        self.assertTrue(panel.remove_selected_root())
+        self.assertEqual([str(self.root)], panel.root_folders())
 
     def test_42_search_time_limit_is_a_profile_option(self):
         self.assertEqual(12, self.panel._profile()["options"]["search_time_limit_seconds"])

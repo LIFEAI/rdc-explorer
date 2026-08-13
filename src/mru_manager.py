@@ -174,6 +174,8 @@ def clear_mru():
 def load_settings() -> dict:
     d = _load("settings.json")
     d.setdefault("rdc2_root", "")
+    # Keep the original key for older panels, while Files uses this ordered list.
+    d.setdefault("root_folders", [d["rdc2_root"]] if d["rdc2_root"] else [])
     d.setdefault("theme", "dark")
     d.setdefault("api_keys", {"anthropic": "", "openai": "", "google": ""})
     d.setdefault("window", {"x": 100, "y": 100, "w": 1200, "h": 800})
