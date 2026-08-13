@@ -32,7 +32,7 @@ from PyQt6.QtGui import QDropEvent
 
 import rdc_dashboard
 import rg_search
-from rdc_dashboard import SearchPanel, FilePanel, SettingsPanel
+from rdc_dashboard import SearchPanel, FilePanel, SettingsPanel, MainWindow
 
 APP = None
 SUPPORTED_GLOBS = (
@@ -482,8 +482,8 @@ class PortableSearchHarness(unittest.TestCase):
         self.files.pin_paths([str(self.root / "notes.md"), str(self.root / "deep")])
         self.assertIn(str(self.root / "notes.md"), rdc_dashboard.mru.get_pinned_files())
         self.assertIn(str(self.root / "deep"), rdc_dashboard.mru.get_pinned_folders())
-        self.assertEqual(self.files.pins.topLevelItem(1).text(0), "Pinned")
-        self.assertEqual(self.files.pins.topLevelItem(1).childCount(), 2)
+        self.assertEqual(self.files.pins.topLevelItem(0).text(0), "Pinned")
+        self.assertEqual(self.files.pins.topLevelItem(0).childCount(), 2)
 
     def test_53_dragged_pin_navigates_the_live_tree_without_file_move(self):
         self.files.pin_paths([str(self.root / "deep")])
@@ -523,7 +523,7 @@ class PortableSearchHarness(unittest.TestCase):
     def test_58_unpin_removes_the_location_from_the_file_tree(self):
         target = str(self.root / "notes.md")
         self.files.pin_paths([target])
-        item = self.files.pins.topLevelItem(1).child(0)
+        item = self.files.pins.topLevelItem(0).child(0)
         self.files.pins.setCurrentItem(item)
         self.files.unpin_selected()
         self.assertNotIn(target, rdc_dashboard.mru.get_pinned_files())
@@ -542,10 +542,9 @@ class PortableSearchHarness(unittest.TestCase):
         other = self.root / "other-root"
         other.mkdir()
         self.files.apply_settings({"rdc2_root": str(self.root), "root_folders": [str(self.root), str(other)]})
-        roots = self.files.pins.topLevelItem(0)
-        self.assertEqual("Root folders", roots.text(0))
-        self.assertEqual(2, roots.childCount())
-        self.assertTrue(roots.isExpanded())
+        pinned = self.files.pins.topLevelItem(0)
+        self.assertEqual("Pinned", pinned.text(0))
+        self.assertTrue(pinned.isExpanded())
         self.assertEqual(self.files.pins.parentWidget(), self.files.tree_stack.parentWidget())
 
     def test_61_settings_root_list_add_remove_and_save_are_directly_controllable(self):
@@ -583,6 +582,22 @@ class PortableSearchHarness(unittest.TestCase):
         with patch.object(rdc_dashboard.QMenu, "exec", side_effect=lambda _position: calls.append(True)):
             self.files.show_file_menu(str(self.root / "notes.md"), None)
         self.assertEqual([True], calls)
+
+    def test_65_left_tree_drop_on_right_preview_loads_the_file(self):
+        target = self.root / "notes.md"
+        mime = QMimeData()
+        mime.setUrls([QUrl.fromLocalFile(str(target))])
+        event = QDropEvent(QPointF(8, 8), Qt.DropAction.CopyAction, mime,
+                           Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+        self.files.preview.dropEvent(event)
+        self.assertIn("Needle appears here", self.files.preview.toPlainText())
+
+    def test_66_main_window_uses_top_panel_menu_not_left_navigation_buttons(self):
+        settings = {"rdc2_root": str(self.root), "root_folders": [str(self.root)], "api_keys": {}, "theme": "dark", "window": {"x": 0, "y": 0, "w": 1100, "h": 700}}
+        window = MainWindow(settings)
+        self.addCleanup(window.close)
+        self.assertFalse(hasattr(window, "nav_buttons"))
+        self.assertEqual("Panels", window.menuBar().actions()[0].text())
 
     def test_42_search_time_limit_is_a_profile_option(self):
         self.assertEqual(12, self.panel._profile()["options"]["search_time_limit_seconds"])

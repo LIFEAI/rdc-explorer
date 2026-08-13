@@ -132,6 +132,34 @@ class ZoomableContext(QTextEdit):
         super().wheelEvent(event)
 
 
+class DroppablePreview(ZoomableContext):
+    """Right-hand preview accepts a real drop from the left navigation tree."""
+    paths_dropped = pyqtSignal(list)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls() or event.mimeData().hasFormat("application/x-rdc-pin-path"):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):
+        self.dragEnterEvent(event)
+
+    def dropEvent(self, event):
+        paths = [url.toLocalFile() for url in event.mimeData().urls() if url.isLocalFile()]
+        if not paths and event.mimeData().hasFormat("application/x-rdc-pin-path"):
+            paths = [bytes(event.mimeData().data("application/x-rdc-pin-path")).decode("utf-8")]
+        if paths:
+            self.paths_dropped.emit(paths)
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+
 # ── Drag-drop file list ──────────────────────────────────────────────────────
 class DropFileList(QListWidget):
     files_dropped = pyqtSignal(list)
@@ -241,6 +269,19 @@ class NavigableFileTree(QTreeView):
             return
         event.ignore()
 
+    def startDrag(self, supported_actions):
+        index = self.currentIndex()
+        path = self.model().filePath(index) if index.isValid() else ""
+        if not path:
+            return
+        mime = QMimeData()
+        mime.setUrls([QUrl.fromLocalFile(path)])
+        mime.setData("application/x-rdc-pin-path", str(path).encode("utf-8"))
+        from PyQt6.QtGui import QDrag
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        drag.exec(Qt.DropAction.CopyAction | Qt.DropAction.MoveAction)
+
     def _request_context(self, position):
         index = self.indexAt(position)
         path = self.model().filePath(index) if index.isValid() else ""
@@ -279,13 +320,10 @@ class FilePanel(QWidget):
         search_row.addWidget(self.tree_status)
         layout.addLayout(search_row)
 
-        # One navigation column: roots, pins, then folders/files.  The preview
-        # deliberately remains below it, so a line preview never competes sideways.
+        # One navigation column: pinned entries, then actual folders/files.
         navigation = QWidget()
         nv = QVBoxLayout(navigation)
         nv.setContentsMargins(0, 0, 0, 0)
-        label = QLabel("Locations"); label.setObjectName("section_title")
-        nv.addWidget(label)
         self.pins = PinTree()
         self.pins.pin_paths_dropped.connect(self.pin_paths)
         self.pins.location_activated.connect(self.open_pinned)
@@ -331,8 +369,9 @@ class FilePanel(QWidget):
         preview_header.addWidget(QLabel("Pinch or Ctrl+wheel to zoom"))
         preview_header.addStretch()
         vv.addLayout(preview_header)
-        self.preview = ZoomableContext()
+        self.preview = DroppablePreview()
         self.preview.setReadOnly(True)
+        self.preview.paths_dropped.connect(self.preview_drop)
         self.preview.setPlaceholderText("Select a file or search match to preview it here.")
         vv.addWidget(self.preview)
 
@@ -341,6 +380,20 @@ class FilePanel(QWidget):
         splitter.addWidget(preview)
         splitter.setSizes([430, 890])
         layout.addWidget(splitter)
+
+    def preview_drop(self, paths):
+        """Drop a left-tree file/folder on the right preview: inspect or navigate it."""
+        if not paths:
+            return False
+        path = os.path.normpath(paths[0])
+        if os.path.isdir(path):
+            self.open_pinned(path)
+            return True
+        if os.path.isfile(path):
+            self.show_preview(path)
+            return True
+        self.tree_status.setText(f"Dropped location is unavailable: {path}")
+        return False
 
     @staticmethod
     def _settings_roots(settings):
@@ -382,14 +435,6 @@ class FilePanel(QWidget):
 
     def _refresh_pins(self):
         self.pins.clear()
-        roots = QTreeWidgetItem(["Root folders"])
-        roots.setFlags(roots.flags() & ~Qt.ItemFlag.ItemIsDragEnabled)
-        self.pins.addTopLevelItem(roots)
-        for path in self.roots:
-            item = QTreeWidgetItem([Path(path).name or path])
-            item.setData(0, Qt.ItemDataRole.UserRole, path)
-            item.setToolTip(0, path)
-            roots.addChild(item)
         pinned = QTreeWidgetItem(["Pinned"])
         pinned.setFlags(pinned.flags() & ~Qt.ItemFlag.ItemIsDragEnabled)
         self.pins.addTopLevelItem(pinned)
@@ -1594,24 +1639,17 @@ class MainWindow(QMainWindow):
 
         central = QWidget()
         self.setCentralWidget(central)
-        root_layout = QHBoxLayout(central)
+        root_layout = QVBoxLayout(central)
         root_layout.setContentsMargins(0, 0, 0, 0)
         root_layout.setSpacing(0)
 
-        # Sidebar
-        sidebar = QWidget()
-        sidebar.setFixedWidth(180)
-        sidebar.setObjectName("sidebar")
-        sidebar_layout = QVBoxLayout(sidebar)
-        sidebar_layout.setContentsMargins(0, 0, 0, 0)
-        sidebar_layout.setSpacing(0)
-
-        logo = QLabel("  🏗 RDC Dashboard")
-        logo.setStyleSheet("font-size:14px; font-weight:bold; color:#5bc0de; padding:16px 8px;")
-        sidebar_layout.addWidget(logo)
+        # Global navigation belongs in the window's top menu, not a left rail.
+        menu_bar = self.menuBar()
+        panels_menu = menu_bar.addMenu("Panels")
+        appearance_menu = menu_bar.addMenu("Appearance")
         self.theme_button = QPushButton()
         self.theme_button.clicked.connect(self.toggle_theme)
-        sidebar_layout.addWidget(self.theme_button)
+        appearance_menu.addAction("Toggle light / dark theme", self.toggle_theme)
 
         self.stack = QStackedWidget()
         self.panels = [
@@ -1622,19 +1660,13 @@ class MainWindow(QMainWindow):
             ("🤖  AI Tools",  AIToolsPanel(settings)),
             ("⚙  Settings",  SettingsPanel(settings)),
         ]
-        self.nav_buttons = []
         for i, (label, panel) in enumerate(self.panels):
             self.stack.addWidget(panel)
-            btn = QPushButton(label)
-            btn.setObjectName("nav_btn")
-            btn.setCheckable(True)
-            btn.clicked.connect(lambda checked, idx=i: self._switch(idx))
-            sidebar_layout.addWidget(btn)
-            self.nav_buttons.append(btn)
+            action = QAction(label, self)
+            action.triggered.connect(lambda checked=False, idx=i: self._switch(idx))
+            panels_menu.addAction(action)
 
-        sidebar_layout.addStretch()
-        root_layout.addWidget(sidebar)
-        root_layout.addWidget(self.stack)
+        root_layout.addWidget(self.stack, 1)
 
         # Wire settings changes
         settings_panel = next(panel for label, panel in self.panels if label.endswith("Settings"))
@@ -1647,8 +1679,6 @@ class MainWindow(QMainWindow):
 
     def _switch(self, idx: int):
         self.stack.setCurrentIndex(idx)
-        for i, btn in enumerate(self.nav_buttons):
-            btn.setChecked(i == idx)
 
     def select_panel(self, page):
         """Public navigation seam shared by startup, UI actions, and tests."""
