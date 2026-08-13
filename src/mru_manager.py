@@ -98,6 +98,8 @@ def _get_mru() -> dict:
     d.setdefault("recent_folders", [])
     d.setdefault("pinned_files", [])
     d.setdefault("pinned_folders", [])
+    # One ordered list powers the Files tree.  Retain legacy lists for migration.
+    d.setdefault("pinned_locations", list(dict.fromkeys(d["pinned_folders"] + d["pinned_files"])))
     d.setdefault("recent_ops", [])
     return d
 
@@ -139,14 +141,23 @@ def get_recent_ops() -> list:
 
 
 def pin_file(path: str):
-    d = _get_mru()
-    d["pinned_files"] = _push(d["pinned_files"], path)
-    _save("mru.json", d)
+    pin_path(path)
 
 
 def pin_folder(path: str):
+    pin_path(path)
+
+
+def pin_path(path: str):
     d = _get_mru()
-    d["pinned_folders"] = _push(d["pinned_folders"], path)
+    normalized = os.path.normpath(path)
+    d["pinned_locations"] = _push(d["pinned_locations"], normalized)
+    d["pinned_files"] = [item for item in d["pinned_files"] if item != normalized]
+    d["pinned_folders"] = [item for item in d["pinned_folders"] if item != normalized]
+    if os.path.isdir(normalized):
+        d["pinned_folders"] = _push(d["pinned_folders"], normalized)
+    else:
+        d["pinned_files"] = _push(d["pinned_files"], normalized)
     _save("mru.json", d)
 
 
@@ -154,6 +165,7 @@ def unpin(path: str):
     d = _get_mru()
     d["pinned_files"] = [item for item in d["pinned_files"] if item != path]
     d["pinned_folders"] = [item for item in d["pinned_folders"] if item != path]
+    d["pinned_locations"] = [item for item in d["pinned_locations"] if item != path]
     _save("mru.json", d)
 
 
@@ -165,8 +177,18 @@ def get_pinned_folders() -> list:
     return _get_mru()["pinned_folders"]
 
 
+def get_pinned_locations() -> list:
+    return _get_mru()["pinned_locations"]
+
+
+def set_pinned_locations(paths: list):
+    d = _get_mru()
+    d["pinned_locations"] = list(dict.fromkeys(os.path.normpath(path) for path in paths if path))[:MAX_MRU]
+    _save("mru.json", d)
+
+
 def clear_mru():
-    _save("mru.json", {"recent_files": [], "recent_folders": [], "pinned_files": [], "pinned_folders": [], "recent_ops": []})
+    _save("mru.json", {"recent_files": [], "recent_folders": [], "pinned_files": [], "pinned_folders": [], "pinned_locations": [], "recent_ops": []})
 
 
 # ── Settings ─────────────────────────────────────────────────────────────────

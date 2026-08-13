@@ -482,8 +482,8 @@ class PortableSearchHarness(unittest.TestCase):
         self.files.pin_paths([str(self.root / "notes.md"), str(self.root / "deep")])
         self.assertIn(str(self.root / "notes.md"), rdc_dashboard.mru.get_pinned_files())
         self.assertIn(str(self.root / "deep"), rdc_dashboard.mru.get_pinned_folders())
-        self.assertEqual(self.files.pins.topLevelItem(1).childCount(), 1)
-        self.assertEqual(self.files.pins.topLevelItem(2).childCount(), 1)
+        self.assertEqual(self.files.pins.topLevelItem(1).text(0), "Pinned")
+        self.assertEqual(self.files.pins.topLevelItem(1).childCount(), 2)
 
     def test_53_dragged_pin_navigates_the_live_tree_without_file_move(self):
         self.files.pin_paths([str(self.root / "deep")])
@@ -523,7 +523,7 @@ class PortableSearchHarness(unittest.TestCase):
     def test_58_unpin_removes_the_location_from_the_file_tree(self):
         target = str(self.root / "notes.md")
         self.files.pin_paths([target])
-        item = self.files.pins.topLevelItem(2).child(0)
+        item = self.files.pins.topLevelItem(1).child(0)
         self.files.pins.setCurrentItem(item)
         self.files.unpin_selected()
         self.assertNotIn(target, rdc_dashboard.mru.get_pinned_files())
@@ -561,6 +561,28 @@ class PortableSearchHarness(unittest.TestCase):
         panel.roots_list.setCurrentRow(1)
         self.assertTrue(panel.remove_selected_root())
         self.assertEqual([str(self.root)], panel.root_folders())
+
+    def test_62_pinned_locations_are_one_ordered_mixed_list(self):
+        folder = str(self.root / "deep")
+        file = str(self.root / "notes.md")
+        self.files.pin_paths([folder, file])
+        self.files.pins.pin_order_changed.emit([file, folder])
+        self.assertEqual([file, folder], rdc_dashboard.mru.get_pinned_locations())
+
+    def test_63_verify_missing_pin_repins_a_matching_file_in_a_root(self):
+        missing = str(self.root / "gone" / "notes.md")
+        self.files.pin_paths([missing])
+        with patch.object(rdc_dashboard.rg_search, "locate_rg", return_value=self.rg_path), \
+             patch.object(rdc_dashboard.QMessageBox, "question", return_value=rdc_dashboard.QMessageBox.StandardButton.No):
+            found = self.files.verify_pinned(missing)
+        self.assertEqual(str(self.root / "notes.md"), found)
+        self.assertIn(found, rdc_dashboard.mru.get_pinned_locations())
+
+    def test_64_file_context_menu_exposes_standard_actions(self):
+        calls = []
+        with patch.object(rdc_dashboard.QMenu, "exec", side_effect=lambda _position: calls.append(True)):
+            self.files.show_file_menu(str(self.root / "notes.md"), None)
+        self.assertEqual([True], calls)
 
     def test_42_search_time_limit_is_a_profile_option(self):
         self.assertEqual(12, self.panel._profile()["options"]["search_time_limit_seconds"])

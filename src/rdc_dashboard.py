@@ -15,6 +15,8 @@ import traceback
 import faulthandler
 import copy
 import re
+import subprocess
+import shutil
 from datetime import datetime
 from pathlib import Path
 
@@ -23,7 +25,7 @@ from PyQt6.QtWidgets import (
     QStackedWidget, QPushButton, QLabel, QLineEdit, QTextEdit,
     QFileDialog, QCheckBox, QProgressBar, QListWidget, QListWidgetItem,
     QTreeView, QSplitter, QTabWidget, QComboBox, QAbstractItemView,
-    QSystemTrayIcon, QMenu, QSizePolicy, QFrame, QSpinBox, QMessageBox, QTreeWidget, QTreeWidgetItem,
+    QSystemTrayIcon, QMenu, QSizePolicy, QFrame, QSpinBox, QMessageBox, QTreeWidget, QTreeWidgetItem, QInputDialog,
 )
 from PyQt6.QtCore import (
     Qt, QDir, QModelIndex, pyqtSignal, QObject, QThread, QEvent, QMimeData, QUrl,
@@ -159,6 +161,8 @@ class PinTree(QTreeWidget):
     """Persistent locations that accept a file/folder drop without moving it on disk."""
     pin_paths_dropped = pyqtSignal(list)
     location_activated = pyqtSignal(str)
+    pin_order_changed = pyqtSignal(list)
+    context_requested = pyqtSignal(str, object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -166,6 +170,9 @@ class PinTree(QTreeWidget):
         self.setAcceptDrops(True)
         self.setDragEnabled(True)
         self.setDragDropMode(QAbstractItemView.DragDropMode.DragDrop)
+        self.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._request_context)
         self.itemActivated.connect(lambda item, _column: self.location_activated.emit(item.data(0, Qt.ItemDataRole.UserRole) or ""))
 
     def dragEnterEvent(self, event):
@@ -184,6 +191,15 @@ class PinTree(QTreeWidget):
             event.acceptProposedAction()
             return
         super().dropEvent(event)
+        pinned = self.topLevelItem(1) if self.topLevelItemCount() > 1 else None
+        if pinned:
+            self.pin_order_changed.emit([pinned.child(index).data(0, Qt.ItemDataRole.UserRole) for index in range(pinned.childCount())])
+
+    def _request_context(self, position):
+        item = self.itemAt(position)
+        path = item.data(0, Qt.ItemDataRole.UserRole) if item else ""
+        if path:
+            self.context_requested.emit(path, self.mapToGlobal(position))
 
     def startDrag(self, supported_actions):
         item = self.currentItem()
@@ -201,10 +217,13 @@ class PinTree(QTreeWidget):
 class NavigableFileTree(QTreeView):
     """A filesystem tree where a dragged pin navigates, never copies or moves a file."""
     pin_dropped = pyqtSignal(str)
+    context_requested = pyqtSignal(str, object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setAcceptDrops(True)
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._request_context)
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasFormat("application/x-rdc-pin-path"):
@@ -221,6 +240,12 @@ class NavigableFileTree(QTreeView):
             event.acceptProposedAction()
             return
         event.ignore()
+
+    def _request_context(self, position):
+        index = self.indexAt(position)
+        path = self.model().filePath(index) if index.isValid() else ""
+        if path:
+            self.context_requested.emit(path, self.mapToGlobal(position))
 
 
 # ── File Panel ───────────────────────────────────────────────────────────────
@@ -264,16 +289,9 @@ class FilePanel(QWidget):
         self.pins = PinTree()
         self.pins.pin_paths_dropped.connect(self.pin_paths)
         self.pins.location_activated.connect(self.open_pinned)
+        self.pins.pin_order_changed.connect(mru.set_pinned_locations)
+        self.pins.context_requested.connect(self.show_location_menu)
         nv.addWidget(self.pins)
-        pin_actions = QHBoxLayout()
-        self.pin_selected_button = QPushButton("Pin selected")
-        self.pin_selected_button.clicked.connect(self.pin_selected)
-        pin_actions.addWidget(self.pin_selected_button)
-        self.unpin_button = QPushButton("Unpin")
-        self.unpin_button.clicked.connect(self.unpin_selected)
-        pin_actions.addWidget(self.unpin_button)
-        pin_actions.addStretch()
-        nv.addLayout(pin_actions)
         self._refresh_pins()
 
         label = QLabel("Folders and files"); label.setObjectName("section_title")
@@ -290,6 +308,7 @@ class FilePanel(QWidget):
         self.tree.setRootIndex(self.model.index(self.current_root))
         self.tree.doubleClicked.connect(self._open_file)
         self.tree.pin_dropped.connect(self.open_pinned)
+        self.tree.context_requested.connect(self.show_file_menu)
 
         self.search_results = QTreeWidget()
         self.search_results.setHeaderLabels(["Directory / file", "Matches"])
@@ -298,10 +317,6 @@ class FilePanel(QWidget):
         self.tree_stack.addWidget(self.tree)
         self.tree_stack.addWidget(self.search_results)
         nv.addWidget(self.tree_stack, 1)
-
-        btn_open = QPushButton("Open active folder in Explorer")
-        btn_open.clicked.connect(self._open_explorer)
-        nv.addWidget(btn_open)
 
         preview = QWidget()
         vv = QVBoxLayout(preview)
@@ -321,10 +336,10 @@ class FilePanel(QWidget):
         self.preview.setPlaceholderText("Select a file or search match to preview it here.")
         vv.addWidget(self.preview)
 
-        splitter = QSplitter(Qt.Orientation.Vertical)
+        splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(navigation)
         splitter.addWidget(preview)
-        splitter.setSizes([440, 320])
+        splitter.setSizes([430, 890])
         layout.addWidget(splitter)
 
     @staticmethod
@@ -375,31 +390,23 @@ class FilePanel(QWidget):
             item.setData(0, Qt.ItemDataRole.UserRole, path)
             item.setToolTip(0, path)
             roots.addChild(item)
-        folders = QTreeWidgetItem(["Pinned folders"])
-        folders.setFlags(folders.flags() & ~Qt.ItemFlag.ItemIsDragEnabled)
-        self.pins.addTopLevelItem(folders)
-        for path in mru.get_pinned_folders():
-            item = QTreeWidgetItem([Path(path).name or path])
-            item.setData(0, Qt.ItemDataRole.UserRole, path)
-            item.setToolTip(0, path)
-            folders.addChild(item)
-        files = QTreeWidgetItem(["Pinned files"])
-        files.setFlags(files.flags() & ~Qt.ItemFlag.ItemIsDragEnabled)
-        self.pins.addTopLevelItem(files)
-        for path in mru.get_pinned_files():
+        pinned = QTreeWidgetItem(["Pinned"])
+        pinned.setFlags(pinned.flags() & ~Qt.ItemFlag.ItemIsDragEnabled)
+        self.pins.addTopLevelItem(pinned)
+        for path in mru.get_pinned_locations():
             item = QTreeWidgetItem([Path(path).name])
             item.setData(0, Qt.ItemDataRole.UserRole, path)
             item.setToolTip(0, path)
-            files.addChild(item)
+            pinned.addChild(item)
         self.pins.expandAll()
 
     def pin_paths(self, paths):
         for path in paths:
             path = os.path.normpath(path)
             if os.path.isdir(path):
-                mru.pin_folder(path)
+                mru.pin_path(path)
             elif os.path.isfile(path):
-                mru.pin_file(path)
+                mru.pin_path(path)
         self._refresh_pins()
 
     def pin_selected(self):
@@ -414,6 +421,104 @@ class FilePanel(QWidget):
         if path:
             mru.unpin(path)
             self._refresh_pins()
+
+    def _open_path(self, path):
+        if not os.path.exists(path):
+            return False
+        if sys.platform == "win32":
+            os.startfile(path)
+        elif sys.platform == "darwin":
+            os.system(f'open "{path}"')
+        else:
+            os.system(f'xdg-open "{path}"')
+        return True
+
+    def show_location_menu(self, path, position):
+        menu = QMenu(self)
+        menu.addAction("Open", lambda: self._open_path(path))
+        menu.addAction("Verify pinned location", lambda: self.verify_pinned(path))
+        menu.addSeparator()
+        menu.addAction("Rename", lambda: self.rename_path(path))
+        menu.addAction("Delete…", lambda: self.delete_path(path))
+        menu.addSeparator()
+        menu.addAction("Unpin", lambda: self.unpin_path(path))
+        menu.exec(position)
+
+    def show_file_menu(self, path, position):
+        menu = QMenu(self)
+        menu.addAction("Open", lambda: self._open_path(path))
+        menu.addAction("Pin", lambda: self.pin_paths([path]))
+        menu.addSeparator()
+        menu.addAction("Rename", lambda: self.rename_path(path))
+        menu.addAction("Delete…", lambda: self.delete_path(path))
+        menu.exec(position)
+
+    def unpin_path(self, path):
+        mru.unpin(path)
+        self._refresh_pins()
+
+    def rename_path(self, path):
+        if not os.path.exists(path):
+            return False
+        new_name, accepted = QInputDialog.getText(self, "Rename", "New name:", text=Path(path).name)
+        if not accepted or not new_name.strip() or new_name.strip() == Path(path).name:
+            return False
+        destination = str(Path(path).with_name(new_name.strip()))
+        if os.path.exists(destination):
+            QMessageBox.warning(self, "Rename", "That name already exists.")
+            return False
+        os.rename(path, destination)
+        if path in mru.get_pinned_locations():
+            self.unpin_path(path)
+            self.pin_paths([destination])
+        return True
+
+    def delete_path(self, path):
+        if not os.path.exists(path):
+            return False
+        choice = QMessageBox.question(self, "Delete", f"Delete this {'folder' if os.path.isdir(path) else 'file'}?\n\n{path}",
+                                      QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                      QMessageBox.StandardButton.No)
+        if choice != QMessageBox.StandardButton.Yes:
+            return False
+        if os.path.isdir(path):
+            shutil.rmtree(path)
+        else:
+            os.remove(path)
+        self.unpin_path(path)
+        return True
+
+    def verify_pinned(self, path):
+        if os.path.exists(path):
+            self.tree_status.setText(f"Verified: {path}")
+            return path
+        rg = rg_search.locate_rg(mru.load_search_config())
+        name = Path(path).name
+        found = ""
+        if rg and name:
+            for root in self.roots:
+                try:
+                    probe = subprocess.run([rg, "--files", "-g", name, root], capture_output=True, text=True,
+                                           timeout=8, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                    candidate = next((line for line in probe.stdout.splitlines() if line), "")
+                    if candidate:
+                        found = os.path.normpath(candidate)
+                        break
+                except (OSError, subprocess.TimeoutExpired):
+                    continue
+        if found and os.path.exists(found):
+            self.unpin_path(path)
+            self.pin_paths([found])
+            self.tree_status.setText(f"Repinned: {found}")
+            return found
+        choice = QMessageBox.question(self, "Pinned location missing",
+                                      f"Could not find '{name}' in configured roots.\n\nRemove this unavailable pin?",
+                                      QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                      QMessageBox.StandardButton.No)
+        if choice == QMessageBox.StandardButton.Yes:
+            self.unpin_path(path)
+            self.tree_status.setText("Removed unavailable pin.")
+        return ""
 
     def open_pinned(self, path):
         if not path:
