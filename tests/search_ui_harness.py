@@ -27,11 +27,12 @@ if hasattr(sys.stdout, "reconfigure"):
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from PyQt6.QtWidgets import QApplication
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QMimeData, QUrl, QPointF
+from PyQt6.QtGui import QDropEvent
 
 import rdc_dashboard
 import rg_search
-from rdc_dashboard import SearchPanel
+from rdc_dashboard import SearchPanel, FilePanel
 
 APP = None
 SUPPORTED_GLOBS = (
@@ -116,13 +117,22 @@ class PortableSearchHarness(unittest.TestCase):
         self.write_config([default_profile("Harness", self.root)])
         self.settings_patch = patch.object(rdc_dashboard.mru, "search_config_path", lambda: self.config_path)
         self.settings_patch.start()
+        self.mru_path = self.root / "mru-state"
+        self.mru_path.mkdir()
+        self.mru_patch = patch.object(rdc_dashboard.mru, "_config_dir", lambda: self.mru_path)
+        self.mru_patch.start()
         self.panel = SearchPanel()
         self.panel.resize(1280, 820)
         self.panel.show()
+        self.files = FilePanel({"rdc2_root": str(self.root)})
+        self.files.resize(1280, 820)
+        self.files.show()
         QApplication.processEvents()
 
     def tearDown(self):
         self.panel.close()
+        self.files.close()
+        self.mru_patch.stop()
         self.settings_patch.stop()
         self.temp.cleanup()
 
@@ -461,6 +471,72 @@ class PortableSearchHarness(unittest.TestCase):
         row = self.panel.search_input_row
         self.assertLess(row.indexOf(self.panel.query), row.indexOf(self.panel.search_scope))
         self.assertLess(row.indexOf(self.panel.search_scope), row.indexOf(self.panel.search_button))
+
+    def test_51_file_tree_search_uses_active_folder_as_its_only_root(self):
+        profile, _config = self.files.tree_profile()
+        self.assertEqual(profile["roots"], [str(self.root)])
+        self.assertFalse(profile["search_documents"])
+        self.assertLessEqual(profile["options"]["max_total_results"], 500)
+
+    def test_52_pin_file_and_folder_persist_in_file_tree(self):
+        self.files.pin_paths([str(self.root / "notes.md"), str(self.root / "deep")])
+        self.assertIn(str(self.root / "notes.md"), rdc_dashboard.mru.get_pinned_files())
+        self.assertIn(str(self.root / "deep"), rdc_dashboard.mru.get_pinned_folders())
+        self.assertEqual(self.files.pins.topLevelItem(0).childCount(), 1)
+        self.assertEqual(self.files.pins.topLevelItem(1).childCount(), 1)
+
+    def test_53_dragged_pin_navigates_the_live_tree_without_file_move(self):
+        self.files.pin_paths([str(self.root / "deep")])
+        self.files.open_pinned(str(self.root / "deep"))
+        self.assertEqual(self.files.current_root, str(self.root / "deep"))
+        self.assertTrue((self.root / "deep" / "below.md").is_file())
+
+    def test_54_tree_search_groups_files_by_directory_and_previews_first_match(self):
+        self.files.tree_query.setText("needle")
+        self.assertTrue(self.files.search_tree())
+        wait_until(lambda: self.files.tree_search_button.isEnabled())
+        self.assertGreater(self.files.search_results.topLevelItemCount(), 0)
+        directory = self.files.search_results.topLevelItem(0)
+        self.assertGreater(directory.childCount(), 0)
+        self.assertIn("needle", self.files.preview.toPlainText().lower())
+
+    def test_55_clear_tree_search_returns_to_live_filesystem_tree(self):
+        self.files.tree_query.setText("needle")
+        self.files.search_tree()
+        wait_until(lambda: self.files.tree_search_button.isEnabled())
+        self.files.clear_tree_search()
+        self.assertIs(self.files.tree_stack.currentWidget(), self.files.tree)
+
+    def test_56_tree_search_uses_the_same_safe_query_grammar(self):
+        self.files.tree_query.setText('"Needle appears" and here')
+        self.assertTrue(self.files.search_tree())
+        wait_until(lambda: self.files.tree_search_button.isEnabled())
+        self.assertGreater(self.files.search_results.topLevelItemCount(), 0)
+
+    def test_57_file_preview_text_zoom_and_reset_are_directly_controllable(self):
+        self.files.show_preview(str(self.root / "notes.md"), 1)
+        self.files.set_preview_zoom(2)
+        self.assertEqual(self.files.preview_zoom, 2)
+        self.files.reset_preview_zoom()
+        self.assertEqual(self.files.preview_zoom, 0)
+
+    def test_58_unpin_removes_the_location_from_the_file_tree(self):
+        target = str(self.root / "notes.md")
+        self.files.pin_paths([target])
+        item = self.files.pins.topLevelItem(1).child(0)
+        self.files.pins.setCurrentItem(item)
+        self.files.unpin_selected()
+        self.assertNotIn(target, rdc_dashboard.mru.get_pinned_files())
+
+    def test_59_file_tree_url_drop_pins_without_moving_the_source_file(self):
+        target = self.root / "notes.md"
+        mime = QMimeData()
+        mime.setUrls([QUrl.fromLocalFile(str(target))])
+        event = QDropEvent(QPointF(8, 8), Qt.DropAction.CopyAction, mime,
+                           Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+        self.files.pins.dropEvent(event)
+        self.assertIn(str(target), rdc_dashboard.mru.get_pinned_files())
+        self.assertTrue(target.is_file())
 
     def test_42_search_time_limit_is_a_profile_option(self):
         self.assertEqual(12, self.panel._profile()["options"]["search_time_limit_seconds"])

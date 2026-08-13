@@ -96,6 +96,8 @@ def _get_mru() -> dict:
     d = _load("mru.json")
     d.setdefault("recent_files", [])
     d.setdefault("recent_folders", [])
+    d.setdefault("pinned_files", [])
+    d.setdefault("pinned_folders", [])
     d.setdefault("recent_ops", [])
     return d
 
@@ -136,8 +138,35 @@ def get_recent_ops() -> list:
     return _get_mru()["recent_ops"]
 
 
+def pin_file(path: str):
+    d = _get_mru()
+    d["pinned_files"] = _push(d["pinned_files"], path)
+    _save("mru.json", d)
+
+
+def pin_folder(path: str):
+    d = _get_mru()
+    d["pinned_folders"] = _push(d["pinned_folders"], path)
+    _save("mru.json", d)
+
+
+def unpin(path: str):
+    d = _get_mru()
+    d["pinned_files"] = [item for item in d["pinned_files"] if item != path]
+    d["pinned_folders"] = [item for item in d["pinned_folders"] if item != path]
+    _save("mru.json", d)
+
+
+def get_pinned_files() -> list:
+    return _get_mru()["pinned_files"]
+
+
+def get_pinned_folders() -> list:
+    return _get_mru()["pinned_folders"]
+
+
 def clear_mru():
-    _save("mru.json", {"recent_files": [], "recent_folders": [], "recent_ops": []})
+    _save("mru.json", {"recent_files": [], "recent_folders": [], "pinned_files": [], "pinned_folders": [], "recent_ops": []})
 
 
 # ── Settings ─────────────────────────────────────────────────────────────────
