@@ -52,15 +52,6 @@ def write_crash_log(origin, exc_type, exc_value, exc_traceback):
         pass
 
 
-class SafeApplication(QApplication):
-    """Keeps a bad UI callback from silently killing the desktop process."""
-    def notify(self, receiver, event):
-        try:
-            return super().notify(receiver, event)
-        except Exception:
-            write_crash_log("qt-event", *sys.exc_info())
-            return False
-
 # ── Dark stylesheet ──────────────────────────────────────────────────────────
 DARK_QSS = """
 QMainWindow, QWidget          { background: #1e1e1e; color: #d4d4d4; font-family: Segoe UI, Arial; font-size: 13px; }
@@ -109,7 +100,7 @@ QLabel#section_title          { font-size: 15px; font-weight: bold; color: #1769
 # ── Worker signals ───────────────────────────────────────────────────────────
 class WorkerSignals(QObject):
     log    = pyqtSignal(str)
-    failed = pyqtSignal(str)
+    failed = pyqtSignal(object)
     done   = pyqtSignal()
     result = pyqtSignal(object)
     search_finished = pyqtSignal(int)
@@ -1247,7 +1238,7 @@ def main():
     threading.excepthook = lambda args: write_crash_log(
         f"thread:{args.thread.name}", args.exc_type, args.exc_value, args.exc_traceback
     )
-    app = SafeApplication(sys.argv)
+    app = QApplication(sys.argv)
     app.setApplicationName("RDC Dashboard")
     app.setQuitOnLastWindowClosed(False)
 

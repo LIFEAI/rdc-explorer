@@ -411,6 +411,13 @@ class PortableSearchHarness(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "one-time extractor projection"):
             self.panel._scoped_profile(self.panel._profile())
 
+    def test_44_worker_failure_reenables_search_and_shows_the_error(self):
+        with patch("rg_search.search", side_effect=RuntimeError("forced worker failure")):
+            self.panel.submit_search("needle")
+            wait_until(lambda: self.panel.search_button.isEnabled())
+        self.assertIn("forced worker failure", self.panel.status.text())
+        self.assertFalse(self.panel.search_busy.isVisible())
+
     def test_42_search_time_limit_is_a_profile_option(self):
         self.assertEqual(12, self.panel._profile()["options"]["search_time_limit_seconds"])
 
