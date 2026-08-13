@@ -64,6 +64,8 @@ def load_search_config() -> dict:
                 exclusions.append(pattern)
                 changed = True
         profile.setdefault("options", {}).setdefault("max_total_results", 5000)
+        profile.setdefault("options", {}).setdefault("search_time_limit_seconds", 12)
+        profile.setdefault("search_documents", False)
     if changed:
         save_search_config(config)
     return config

@@ -6,13 +6,16 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
 
 DOCUMENT_SUFFIXES = {".pdf", ".docx", ".pptx"}
 CODE_PATTERNS = ("*.ts", "*.tsx", "*.js", "*.jsx", "*.mjs", "*.cjs", "*.py", "*.ps1", "*.psm1", "*.psd1", "*.sql", "*.html", "*.css", "*.scss", "*.xml")
-DOC_PATTERNS = ("*.md", "*.mdx", "*.txt", "*.pdf", "*.docx", "*.pptx")
+# Docs are extracted once by the configured extraction workflow, then searched as
+# Markdown/text. Binary formats are deliberately not reparsed during a search.
+DOC_PATTERNS = ("*.md", "*.mdx", "*.txt")
 
 
 def locate_rg(config: dict) -> str | None:
@@ -41,11 +44,15 @@ def runtime_self_test() -> dict:
 
 
 def _document_patterns(profile: dict) -> list[str]:
+    # Legacy direct binary extraction is intentionally off in product profiles.
+    # The extractor contract supplies a one-time Markdown/text projection instead.
+    if not profile.get("allow_legacy_binary_extraction", False):
+        return []
     return [pattern for pattern in profile.get("include", []) if Path(pattern).suffix.lower() in DOCUMENT_SUFFIXES]
 
 
 def _text_patterns(profile: dict) -> list[str]:
-    return [pattern for pattern in profile.get("include", []) if pattern not in _document_patterns(profile)]
+    return [pattern for pattern in profile.get("include", []) if Path(pattern).suffix.lower() not in DOCUMENT_SUFFIXES]
 
 
 def parse_query(query: str) -> list[str]:
@@ -110,9 +117,15 @@ def matches_query(text: str, query: str, options: dict) -> bool:
     return bool(stack and stack[-1])
 
 
-def _area_at_line(path: Path, line_number: int) -> tuple[int, str]:
+def _area_at_line(path: Path, line_number: int, cache: dict) -> tuple[int, str]:
     """Return a blank-line-delimited paragraph/source area without retaining file text."""
-    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    key = str(path)
+    lines = cache.get(key)
+    if lines is None:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        if len(cache) >= 8:
+            cache.pop(next(iter(cache)))
+        cache[key] = lines
     index = max(0, min(line_number - 1, len(lines) - 1))
     start, end = index, index
     while start > 0 and lines[start - 1].strip():
@@ -162,7 +175,7 @@ def build_command(query: str, profile: dict, config: dict) -> list[str]:
     return command
 
 
-def _search_text(query: str, profile: dict, config: dict, cancel_event=None):
+def _search_text(query: str, profile: dict, config: dict, cancel_event=None, deadline=None):
     if not _text_patterns(profile):
         return
     command = build_command(query, profile, config)
@@ -170,10 +183,10 @@ def _search_text(query: str, profile: dict, config: dict, cancel_event=None):
         command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True, encoding="utf-8", errors="replace", creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
-    emitted_areas = set()
+    emitted_areas, area_cache = set(), {}
     try:
         for raw in process.stdout:
-            if cancel_event and cancel_event.is_set():
+            if (cancel_event and cancel_event.is_set()) or (deadline and time.monotonic() >= deadline):
                 return
             try:
                 event = json.loads(raw)
@@ -187,7 +200,7 @@ def _search_text(query: str, profile: dict, config: dict, cancel_event=None):
             display_line = data["line_number"]
             if options.get("same_area"):
                 try:
-                    display_line, area = _area_at_line(Path(data["path"]["text"]), data["line_number"])
+                    display_line, area = _area_at_line(Path(data["path"]["text"]), data["line_number"], area_cache)
                 except OSError:
                     continue
                 area_key = (data["path"]["text"], display_line)
@@ -239,7 +252,7 @@ def _is_temporary(path: Path) -> bool:
     return any("temp" in part.lower() or "tmp" in part.lower() for part in path.parts)
 
 
-def _document_files(profile: dict):
+def _document_files(profile: dict, deadline=None):
     patterns = _document_patterns(profile)
     if not patterns:
         return
@@ -248,6 +261,7 @@ def _document_files(profile: dict):
     max_size = _bytes(options.get("max_file_size", "10M"))
     include_hidden = bool(options.get("hidden"))
     exclusions = list(profile.get("exclude", []))
+    examined = 0
     for root_text in profile.get("roots", []):
         root = Path(root_text)
         if not root.is_dir():
@@ -263,6 +277,8 @@ def _document_files(profile: dict):
                 and (not max_depth or len((relative_dir / name).parts) <= max_depth)
             ]
             for name in files:
+                if deadline and time.monotonic() >= deadline:
+                    return
                 relative = relative_dir / name
                 if _is_temporary(relative) or (not include_hidden and _is_hidden(relative)) or _excluded(relative, exclusions):
                     continue
@@ -273,6 +289,9 @@ def _document_files(profile: dict):
                 candidate = current / name
                 try:
                     if candidate.stat().st_size <= max_size:
+                        examined += 1
+                        if examined > 250:
+                            return
                         yield candidate
                 except OSError:
                     continue
@@ -328,11 +347,11 @@ def _is_frontmatter_line(path: Path, line_number: int) -> bool:
     return False
 
 
-def _search_documents(query: str, profile: dict, cancel_event=None):
+def _search_documents(query: str, profile: dict, cancel_event=None, deadline=None):
     options = profile.get("options", {})
     per_file = int(options.get("max_matches_per_file", 100))
-    for path in _document_files(profile):
-        if cancel_event and cancel_event.is_set():
+    for path in _document_files(profile, deadline):
+        if (cancel_event and cancel_event.is_set()) or (deadline and time.monotonic() >= deadline):
             return
         try:
             emitted = 0
@@ -368,9 +387,10 @@ def _search_documents(query: str, profile: dict, cancel_event=None):
 def search(query: str, profile: dict, config: dict, cancel_event=None):
     """Yield normalized text and document matches using one profile contract."""
     remaining = int(profile.get("options", {}).get("max_total_results", 5000))
-    for source in (_search_text(query, profile, config, cancel_event), _search_documents(query, profile, cancel_event)):
+    deadline = time.monotonic() + int(profile.get("options", {}).get("search_time_limit_seconds", 12))
+    for source in (_search_text(query, profile, config, cancel_event, deadline), _search_documents(query, profile, cancel_event, deadline)):
         for match in source:
-            if cancel_event and cancel_event.is_set():
+            if (cancel_event and cancel_event.is_set()) or time.monotonic() >= deadline:
                 return
             yield match
             remaining -= 1

@@ -60,8 +60,11 @@ def default_profile(name, root, include=SUPPORTED_GLOBS, exclude=("**/node_modul
             "same_area": False,
             "max_depth": 0, "threads": 0, "max_matches_per_file": 100,
             "max_total_results": 5000,
+            "search_time_limit_seconds": 12,
             "max_file_size": "10M",
         },
+        "search_documents": True,
+        "allow_legacy_binary_extraction": True,
     }
 
 
@@ -392,6 +395,24 @@ class PortableSearchHarness(unittest.TestCase):
         area_matches = [match for match in matches if match["path"].endswith("areas.md")]
         self.assertEqual(1, len(area_matches))
         self.assertEqual(1, area_matches[0]["line"])
+
+    def test_41_blank_scope_skips_expensive_document_extraction(self):
+        self.panel._profile()["search_documents"] = False
+        self.panel._profile()["allow_legacy_binary_extraction"] = False
+        self.assertEqual([], rg_search._document_patterns(self.panel._profile()))
+        self.panel.set_search_scope("docs")
+        scoped, source = self.panel._scoped_profile(self.panel._profile())
+        self.assertEqual("disk", source)
+        self.assertFalse(scoped["search_documents"])
+        self.assertEqual(["*.md", "*.mdx", "*.txt"], scoped["include"])
+
+    def test_43_binary_docs_require_the_one_time_extractor_projection(self):
+        self.panel.set_search_scope("*.pdf")
+        with self.assertRaisesRegex(ValueError, "one-time extractor projection"):
+            self.panel._scoped_profile(self.panel._profile())
+
+    def test_42_search_time_limit_is_a_profile_option(self):
+        self.assertEqual(12, self.panel._profile()["options"]["search_time_limit_seconds"])
 
     def test_33_unhandled_exception_writes_persistent_crash_log(self):
         crash_path = self.root / "crash.log"

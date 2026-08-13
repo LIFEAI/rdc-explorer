@@ -435,13 +435,14 @@ class SearchPanel(QWidget):
         scoped = copy.deepcopy(profile)
         raw = self.search_scope.text().strip()
         if not raw:
+            scoped["search_documents"] = False
             return scoped, "disk"
         scopes = [part.casefold() for part in re.split(r"[\s,]+", raw) if part]
         if "cf" in scopes:
             if len(scopes) != 1:
                 raise ValueError("Use IN cf by itself; CodeFlow does not search disk extensions.")
             return scoped, "codeflow"
-        patterns, frontmatter = [], False
+        patterns, frontmatter, documents = [], False, False
         for scope in scopes:
             if scope == "code":
                 patterns.extend(rg_search.CODE_PATTERNS)
@@ -451,9 +452,12 @@ class SearchPanel(QWidget):
                 patterns.extend(("*.md", "*.mdx")); frontmatter = True
             else:
                 normalized = scope if scope.startswith("*.") else f"*.{scope.lstrip('.')}"
+                if Path(normalized).suffix.lower() in rg_search.DOCUMENT_SUFFIXES:
+                    raise ValueError("Binary documents use the one-time extractor projection; search its generated .md/.txt output with IN docs.")
                 patterns.append(normalized)
         scoped["include"] = list(dict.fromkeys(patterns))
         scoped["frontmatter_only"] = frontmatter
+        scoped["search_documents"] = False
         return scoped, "disk"
 
     def set_pinned(self, pinned):
