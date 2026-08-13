@@ -27,6 +27,7 @@ if hasattr(sys.stdout, "reconfigure"):
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from PyQt6.QtWidgets import QApplication
+from PyQt6.QtCore import Qt
 
 import rdc_dashboard
 import rg_search
@@ -440,7 +441,10 @@ class PortableSearchHarness(unittest.TestCase):
         self.assertTrue(self.panel.next_hit.isEnabled())
 
     def test_48_tab_order_and_enter_signal_connect_query_to_in(self):
-        self.assertIs(self.panel.query.nextInFocusChain(), self.panel.search_scope)
+        candidate = self.panel.query.nextInFocusChain()
+        while candidate.focusPolicy() == Qt.FocusPolicy.NoFocus:
+            candidate = candidate.nextInFocusChain()
+        self.assertIs(candidate, self.panel.search_scope)
         calls = []
         with patch.object(self.panel, "_run_search", side_effect=lambda: calls.append(True)):
             self.panel.search_scope.returnPressed.emit()
@@ -452,6 +456,11 @@ class PortableSearchHarness(unittest.TestCase):
         self.assertEqual(baseline + 1, self.panel.context_zoom)
         self.assertEqual("← Previous hit", self.panel.previous_hit.text())
         self.assertEqual("Next hit →", self.panel.next_hit.text())
+
+    def test_50_search_and_in_share_one_horizontal_input_row(self):
+        row = self.panel.search_input_row
+        self.assertLess(row.indexOf(self.panel.query), row.indexOf(self.panel.search_scope))
+        self.assertLess(row.indexOf(self.panel.search_scope), row.indexOf(self.panel.search_button))
 
     def test_42_search_time_limit_is_a_profile_option(self):
         self.assertEqual(12, self.panel._profile()["options"]["search_time_limit_seconds"])
