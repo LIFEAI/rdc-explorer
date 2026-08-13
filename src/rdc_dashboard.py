@@ -499,7 +499,9 @@ class SearchPanel(QWidget):
         return True
 
     def submit_search(self, query=None):
-        if query is not None:
+        # QPushButton.clicked supplies a boolean `checked` argument. Only callers
+        # that explicitly pass a string are allowed to replace the query text.
+        if isinstance(query, str):
             self.query.setText(query)
         self._run_search()
 

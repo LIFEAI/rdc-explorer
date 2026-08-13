@@ -418,6 +418,13 @@ class PortableSearchHarness(unittest.TestCase):
         self.assertIn("forced worker failure", self.panel.status.text())
         self.assertFalse(self.panel.search_busy.isVisible())
 
+    def test_45_search_button_clicked_signal_does_not_replace_query_with_bool(self):
+        self.panel.query.setText("needle")
+        self.panel.search_button.click()
+        wait_until(lambda: self.panel.search_button.isEnabled())
+        self.assertEqual("needle", self.panel.query.text())
+        self.assertNotIn("unexpected type 'bool'", self.panel.status.text())
+
     def test_42_search_time_limit_is_a_profile_option(self):
         self.assertEqual(12, self.panel._profile()["options"]["search_time_limit_seconds"])
 
