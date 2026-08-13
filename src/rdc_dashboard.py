@@ -279,6 +279,13 @@ class SearchPanel(QWidget):
         self.cancel_button.setEnabled(False)
         self.cancel_button.clicked.connect(self.cancel_search)
         query_row.addWidget(self.cancel_button)
+        self.search_busy = QProgressBar()
+        self.search_busy.setRange(0, 0)
+        self.search_busy.setTextVisible(False)
+        self.search_busy.setFixedWidth(72)
+        self.search_busy.setToolTip("Search is running")
+        self.search_busy.setVisible(False)
+        query_row.addWidget(self.search_busy)
         layout.addLayout(query_row)
 
         profile_row = QHBoxLayout()
@@ -298,7 +305,9 @@ class SearchPanel(QWidget):
         self.hidden = QCheckBox("Include hidden")
         self.follow = QCheckBox("Follow links")
         self.no_ignore = QCheckBox("Ignore .gitignore")
-        for box in (self.regex, self.case_insensitive, self.whole_word, self.hidden, self.follow, self.no_ignore):
+        self.same_area = QCheckBox("Same paragraph / area")
+        self.same_area.setToolTip("All terms must occur in one blank-line-delimited paragraph or source area")
+        for box in (self.regex, self.case_insensitive, self.whole_word, self.hidden, self.follow, self.no_ignore, self.same_area):
             box.stateChanged.connect(self._save_visible_options)
             options.addWidget(box)
         options.addStretch()
@@ -401,6 +410,7 @@ class SearchPanel(QWidget):
             "regex": self.regex, "case_insensitive": self.case_insensitive,
             "whole_word": self.whole_word, "hidden": self.hidden,
             "follow_symlinks": self.follow, "no_ignore": self.no_ignore,
+            "same_area": self.same_area,
             "max_depth": self.max_depth, "threads": self.threads,
             "max_matches_per_file": self.max_matches, "max_total_results": self.max_total_results,
         }
@@ -539,7 +549,7 @@ class SearchPanel(QWidget):
         options = profile.setdefault("options", {})
         widgets = ((self.regex, "regex"), (self.case_insensitive, "case_insensitive"),
                    (self.whole_word, "whole_word"), (self.hidden, "hidden"),
-                   (self.follow, "follow_symlinks"), (self.no_ignore, "no_ignore"))
+                   (self.follow, "follow_symlinks"), (self.no_ignore, "no_ignore"), (self.same_area, "same_area"))
         for widget, key in widgets:
             widget.blockSignals(True); widget.setChecked(bool(options.get(key, False))); widget.blockSignals(False)
         for widget, key in ((self.max_depth, "max_depth"), (self.threads, "threads"), (self.max_matches, "max_matches_per_file"), (self.max_total_results, "max_total_results")):
@@ -564,6 +574,7 @@ class SearchPanel(QWidget):
         profile["options"] = {"regex": self.regex.isChecked(), "case_insensitive": self.case_insensitive.isChecked(),
                               "whole_word": self.whole_word.isChecked(), "hidden": self.hidden.isChecked(),
                               "follow_symlinks": self.follow.isChecked(), "no_ignore": self.no_ignore.isChecked(),
+                              "same_area": self.same_area.isChecked(),
                               "max_depth": self.max_depth.value(), "threads": self.threads.value(),
                               "max_matches_per_file": self.max_matches.value(), "max_total_results": self.max_total_results.value(),
                               "max_file_size": profile.get("options", {}).get("max_file_size", "10M")}
@@ -593,6 +604,7 @@ class SearchPanel(QWidget):
         self.search_generation += 1
         generation = self.search_generation
         self.results.clear(); self.context.clear(); self.match_count = 0; self.matched_paths = set(); self.search_error = ""; self.search_button.setEnabled(False); self.cancel_button.setEnabled(True)
+        self.search_busy.setVisible(True)
         self.result_items = []
         self.result_matches = []
         self.directory_items = {}
@@ -705,6 +717,7 @@ class SearchPanel(QWidget):
         if generation != self.search_generation:
             return
         self.search_error = message
+        self.search_busy.setVisible(False)
         self._set_status(f"Search failed: {message}")
 
     def _finish_search(self, generation=None):
@@ -712,6 +725,7 @@ class SearchPanel(QWidget):
             return
         self.search_button.setEnabled(True)
         self.cancel_button.setEnabled(False)
+        self.search_busy.setVisible(False)
         if not self.search_error:
             if self.cancel_event and self.cancel_event.is_set():
                 self._set_status(f"Cancelled after {self.match_count:,} matching lines in {len(self.matched_paths):,} files.")

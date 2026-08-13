@@ -57,6 +57,7 @@ def default_profile(name, root, include=SUPPORTED_GLOBS, exclude=("**/node_modul
         "options": {
             "regex": False, "case_insensitive": True, "whole_word": False,
             "hidden": False, "follow_symlinks": False, "no_ignore": False,
+            "same_area": False,
             "max_depth": 0, "threads": 0, "max_matches_per_file": 100,
             "max_total_results": 5000,
             "max_file_size": "10M",
@@ -83,6 +84,7 @@ class PortableSearchHarness(unittest.TestCase):
         )
         (self.root / "script.py").write_text("needle = 'python result'\n", encoding="utf-8")
         (self.root / "many.md").write_text("needle\nneedle\nneedle\nneedle\n", encoding="utf-8")
+        (self.root / "areas.md").write_text("needle begins this paragraph\nsecond term appears here\n\nneedle isolated\n\nsecond term isolated\n", encoding="utf-8")
         (self.root / ".hidden.md").write_text("hiddenneedle\n", encoding="utf-8")
         (self.root / "node_modules").mkdir()
         (self.root / "node_modules" / "skip.md").write_text("needle skipped\n", encoding="utf-8")
@@ -364,7 +366,32 @@ class PortableSearchHarness(unittest.TestCase):
             matches = list(rg_search.search_codeflow("needle", {"codeflow_url": "http://codeflow.test"}))
         self.assertEqual("apps/test.ts", matches[0]["path"])
         self.assertIn("function", matches[0]["location"])
-        self.assertEqual("http://codeflow.test/api/codeflow/symbols/search", urlopen.call_args.args[0].full_url)
+        request = urlopen.call_args.args[0]
+        self.assertEqual("http://codeflow.test/api/codeflow/symbols/search", request.full_url)
+        self.assertEqual({"query": "needle", "limit": 64, "offset": 0}, json.loads(request.data.decode("utf-8")))
+
+    def test_38_search_busy_indicator_tracks_worker_lifecycle(self):
+        self.assertFalse(self.panel.search_busy.isVisible())
+        self.panel.query.setText("needle")
+        self.panel._run_search()
+        self.assertTrue(self.panel.search_busy.isVisible())
+        wait_until(lambda: self.panel.search_button.isEnabled())
+        self.assertFalse(self.panel.search_busy.isVisible())
+
+    def test_39_codeflow_response_is_hard_bounded(self):
+        oversized = MagicMock()
+        oversized.headers = {"Content-Length": str(2 * 1024 * 1024 + 1)}
+        with patch("rg_search.urllib.request.urlopen") as urlopen:
+            urlopen.return_value.__enter__.return_value = oversized
+            with self.assertRaisesRegex(RuntimeError, "2 MB safety limit"):
+                list(rg_search.search_codeflow("needle", {"codeflow_url": "http://codeflow.test"}))
+
+    def test_40_same_area_requires_terms_in_one_paragraph(self):
+        self.panel.set_search_options(same_area=True)
+        matches = self.search("needle and second")
+        area_matches = [match for match in matches if match["path"].endswith("areas.md")]
+        self.assertEqual(1, len(area_matches))
+        self.assertEqual(1, area_matches[0]["line"])
 
     def test_33_unhandled_exception_writes_persistent_crash_log(self):
         crash_path = self.root / "crash.log"

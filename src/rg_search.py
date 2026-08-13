@@ -110,6 +110,18 @@ def matches_query(text: str, query: str, options: dict) -> bool:
     return bool(stack and stack[-1])
 
 
+def _area_at_line(path: Path, line_number: int) -> tuple[int, str]:
+    """Return a blank-line-delimited paragraph/source area without retaining file text."""
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    index = max(0, min(line_number - 1, len(lines) - 1))
+    start, end = index, index
+    while start > 0 and lines[start - 1].strip():
+        start -= 1
+    while end + 1 < len(lines) and lines[end + 1].strip():
+        end += 1
+    return start + 1, "\n".join(lines[start:end + 1])
+
+
 def build_command(query: str, profile: dict, config: dict) -> list[str]:
     """Build the exact ripgrep command for text-capable file masks only."""
     rg = locate_rg(config)
@@ -158,6 +170,7 @@ def _search_text(query: str, profile: dict, config: dict, cancel_event=None):
         command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True, encoding="utf-8", errors="replace", creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
+    emitted_areas = set()
     try:
         for raw in process.stdout:
             if cancel_event and cancel_event.is_set():
@@ -170,12 +183,24 @@ def _search_text(query: str, profile: dict, config: dict, cancel_event=None):
                 continue
             data = event["data"]
             text = data["lines"]["text"].rstrip("\r\n")
-            if not matches_query(text, query, profile.get("options", {})):
+            options = profile.get("options", {})
+            display_line = data["line_number"]
+            if options.get("same_area"):
+                try:
+                    display_line, area = _area_at_line(Path(data["path"]["text"]), data["line_number"])
+                except OSError:
+                    continue
+                area_key = (data["path"]["text"], display_line)
+                if area_key in emitted_areas or not matches_query(area, query, options):
+                    continue
+                emitted_areas.add(area_key)
+                text = area.splitlines()[0] if area else text
+            elif not matches_query(text, query, options):
                 continue
             if profile.get("frontmatter_only") and not _is_frontmatter_line(Path(data["path"]["text"]), data["line_number"]):
                 continue
             yield {
-                "path": data["path"]["text"], "line": data["line_number"],
+                "path": data["path"]["text"], "line": display_line,
                 "text": text,
                 "column": data.get("submatches", [{}])[0].get("start", 0) + 1,
             }
@@ -357,23 +382,42 @@ def search_codeflow(query: str, config: dict, cancel_event=None):
     """Search the live CodeFlow symbol graph, never the local disk."""
     base = config.get("codeflow_url") or os.environ.get("CODEFLOW_URL") or "http://127.0.0.1:3109"
     terms = query_terms(query)
-    body = json.dumps({"query": " ".join(terms), "limit": 500}).encode("utf-8")
-    request = urllib.request.Request(
-        base.rstrip("/") + "/api/codeflow/symbols/search", data=body,
-        headers={"Content-Type": "application/json"}, method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=12) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f"CodeFlow is unavailable at {base}: {exc.reason}") from exc
-    for symbol in payload.get("symbols", []):
+    max_results, request_limit, max_payload = 100, 64, 2 * 1024 * 1024
+    seen, emitted = set(), 0
+    for term in dict.fromkeys(terms):
         if cancel_event and cancel_event.is_set():
             return
-        if not matches_query(symbol.get("name") or "", query, {"case_insensitive": True}):
-            continue
-        path = symbol.get("file_path") or "(CodeFlow symbol without a file path)"
-        line = symbol.get("start_line") or 1
-        location = f"{symbol.get('kind') or 'symbol'} • {symbol.get('language') or 'unknown'} • line {line}"
-        yield {"path": path, "line": line, "column": 1, "text": symbol.get("name") or "(unnamed symbol)", "location": location,
-               "preview": json.dumps(symbol, indent=2, ensure_ascii=False), "codeflow": True}
+        body = json.dumps({"query": term, "limit": request_limit, "offset": 0}).encode("utf-8")
+        request = urllib.request.Request(
+            base.rstrip("/") + "/api/codeflow/symbols/search", data=body,
+            headers={"Content-Type": "application/json", "Accept": "application/json"}, method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=8) as response:
+                content_length = response.headers.get("Content-Length")
+                if content_length and int(content_length) > max_payload:
+                    raise RuntimeError("CodeFlow response exceeded the 2 MB safety limit")
+                raw = response.read(max_payload + 1)
+                if len(raw) > max_payload:
+                    raise RuntimeError("CodeFlow response exceeded the 2 MB safety limit")
+                payload = json.loads(raw.decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            detail = exc.read(4096).decode("utf-8", errors="replace")
+            raise RuntimeError(f"CodeFlow rejected the query ({exc.code}): {detail}") from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f"CodeFlow is unavailable at {base}: {exc.reason}") from exc
+        for symbol in payload.get("symbols", []):
+            if cancel_event and cancel_event.is_set():
+                return
+            key = (symbol.get("name"), symbol.get("file_path"), symbol.get("start_line"))
+            if key in seen or not matches_query(symbol.get("name") or "", query, {"case_insensitive": True}):
+                continue
+            seen.add(key)
+            path = symbol.get("file_path") or "(CodeFlow symbol without a file path)"
+            line = symbol.get("start_line") or 1
+            location = f"{symbol.get('kind') or 'symbol'} • {symbol.get('language') or 'unknown'} • line {line}"
+            yield {"path": path, "line": line, "column": 1, "text": symbol.get("name") or "(unnamed symbol)", "location": location,
+                   "preview": json.dumps(symbol, indent=2, ensure_ascii=False), "codeflow": True}
+            emitted += 1
+            if emitted >= max_results:
+                return
