@@ -26,7 +26,7 @@ from PyQt6.QtWidgets import (
     QSystemTrayIcon, QMenu, QSizePolicy, QFrame, QSpinBox, QMessageBox, QTreeWidget, QTreeWidgetItem,
 )
 from PyQt6.QtCore import (
-    Qt, QDir, QModelIndex, pyqtSignal, QObject, QThread,
+    Qt, QDir, QModelIndex, pyqtSignal, QObject, QThread, QEvent,
 )
 from PyQt6.QtGui import (
     QFileSystemModel, QAction, QIcon, QPixmap, QPainter, QColor, QFont,
@@ -108,6 +108,20 @@ class WorkerSignals(QObject):
 
 class ZoomableContext(QTextEdit):
     """Terminal-like context viewer: Ctrl+wheel changes text size without losing position."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.grabGesture(Qt.GestureType.PinchGesture)
+
+    def event(self, event):
+        if event.type() == QEvent.Type.Gesture:
+            gesture = event.gesture(Qt.GestureType.PinchGesture)
+            if gesture:
+                delta = 1 if gesture.totalScaleFactor() > 1.05 else (-1 if gesture.totalScaleFactor() < 0.95 else 0)
+                if delta:
+                    self.zoomIn(delta)
+                    return True
+        return super().event(event)
+
     def wheelEvent(self, event):
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
             self.zoomIn(1 if event.angleDelta().y() > 0 else -1)
@@ -314,6 +328,8 @@ class SearchPanel(QWidget):
         scope_help.setStyleSheet("color:#b7c2d0;")
         source_scope.addWidget(scope_help)
         layout.addLayout(source_scope)
+        QWidget.setTabOrder(self.query, self.search_scope)
+        QWidget.setTabOrder(self.search_scope, self.search_button)
 
         tuning = QHBoxLayout()
         tuning.addWidget(QLabel("Max depth (0 = unlimited):"))
@@ -348,10 +364,14 @@ class SearchPanel(QWidget):
         context_pane = QWidget(); context_layout = QVBoxLayout(context_pane); context_layout.setContentsMargins(0, 0, 0, 0)
         context_layout.addWidget(QLabel("Selected match context (±3 lines)"))
         context_controls = QHBoxLayout()
-        zoom_out = QPushButton("A−"); zoom_out.clicked.connect(lambda: self.set_context_zoom(-1))
-        zoom_in = QPushButton("A+"); zoom_in.clicked.connect(lambda: self.set_context_zoom(1))
-        zoom_reset = QPushButton("Reset zoom"); zoom_reset.clicked.connect(self.reset_context_zoom)
-        context_controls.addWidget(zoom_out); context_controls.addWidget(zoom_in); context_controls.addWidget(zoom_reset); context_controls.addStretch()
+        self.previous_hit = QPushButton("← Previous hit"); self.previous_hit.clicked.connect(lambda: self.navigate_result(-1))
+        self.next_hit = QPushButton("Next hit →"); self.next_hit.clicked.connect(lambda: self.navigate_result(1))
+        self.hit_position = QLabel("No hits")
+        zoom_out = QPushButton("Text −"); zoom_out.clicked.connect(lambda: self.set_context_zoom(-1))
+        zoom_in = QPushButton("Text +"); zoom_in.clicked.connect(lambda: self.set_context_zoom(1))
+        zoom_reset = QPushButton("Reset text"); zoom_reset.clicked.connect(self.reset_context_zoom)
+        context_controls.addWidget(self.previous_hit); context_controls.addWidget(self.next_hit); context_controls.addWidget(self.hit_position)
+        context_controls.addStretch(); context_controls.addWidget(zoom_out); context_controls.addWidget(zoom_in); context_controls.addWidget(zoom_reset)
         context_layout.addLayout(context_controls)
         self.context = ZoomableContext(); self.context.setReadOnly(True); self.context.setFont(QFont("Cascadia Mono", 10)); self.context_zoom = 0
         context_layout.addWidget(self.context)
@@ -380,6 +400,7 @@ class SearchPanel(QWidget):
         config_layout.addLayout(config_buttons)
         tabs.addTab(config_page, "Profiles & Settings")
         self._reload_config()
+        self._update_hit_navigation()
 
     def _profiles(self):
         return self.config.get("profiles", [])
@@ -468,7 +489,32 @@ class SearchPanel(QWidget):
         if item.parent().parent():
             item.parent().parent().setExpanded(True)
         self.results.setCurrentItem(item)
+        self.results.scrollToItem(item)
+        self._update_hit_navigation()
         return True
+
+    def navigate_result(self, delta):
+        if not self.result_items:
+            return False
+        selected = self.results.selectedItems()
+        current = selected[0] if selected else None
+        try:
+            index = self.result_items.index(current)
+        except ValueError:
+            index = 0 if delta >= 0 else len(self.result_items) - 1
+        return self.select_result((index + delta) % len(self.result_items))
+
+    def _update_hit_navigation(self):
+        count = len(self.result_items)
+        selected = self.results.selectedItems()
+        current = selected[0] if selected else None
+        try:
+            position = self.result_items.index(current) + 1
+        except ValueError:
+            position = 0
+        self.previous_hit.setEnabled(bool(count))
+        self.next_hit.setEnabled(bool(count))
+        self.hit_position.setText(f"Hit {position} of {count}" if position else ("No hits" if not count else f"{count} hits"))
 
     def _selected_match(self):
         selected = self.results.selectedItems()
@@ -606,6 +652,7 @@ class SearchPanel(QWidget):
         self.result_matches = []
         self.directory_items = {}
         self.file_items = {}
+        self._update_hit_navigation()
         self.cancel_event = threading.Event()
         self._set_status("Searching CodeFlow symbols…" if source == "codeflow" else "Searching selected roots…")
         threading.Thread(target=self._search_worker, args=(generation, query, profile, self.config.copy(), self.cancel_event, source), daemon=True).start()
@@ -674,6 +721,10 @@ class SearchPanel(QWidget):
         self.result_items.append(item)
         self.result_matches.append(match)
         parent.setText(1, f"{parent.childCount()} hit{'s' if parent.childCount() != 1 else ''}")
+        if len(self.result_items) == 1:
+            self.select_result(0)
+        else:
+            self._update_hit_navigation()
 
     def _show_context(self):
         match = self._selected_match()
@@ -684,6 +735,7 @@ class SearchPanel(QWidget):
                 if path:
                     self.context.setPlainText(f"{path}\n\nExpand this directory or file to choose a matching line.")
             return
+        self._update_hit_navigation()
         if match.get("preview"):
             location = match.get("location", "document")
             self.context.setPlainText(f"{match['path']} — {location}\n\n{match['preview']}")

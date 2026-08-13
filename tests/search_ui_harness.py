@@ -425,6 +425,34 @@ class PortableSearchHarness(unittest.TestCase):
         self.assertEqual("needle", self.panel.query.text())
         self.assertNotIn("unexpected type 'bool'", self.panel.status.text())
 
+    def test_46_first_match_auto_renders_context_without_tree_click(self):
+        self.search("needle")
+        self.assertTrue(self.panel.results.selectedItems())
+        self.assertIn("needle", self.panel.context.toPlainText().casefold())
+        self.assertEqual(f"Hit 1 of {len(self.panel.result_items)}", self.panel.hit_position.text())
+
+    def test_47_bottom_hit_navigation_changes_selection(self):
+        self.search("needle")
+        first = self.panel._selected_match()
+        self.assertTrue(self.panel.navigate_result(1))
+        self.assertNotEqual(first, self.panel._selected_match())
+        self.assertTrue(self.panel.previous_hit.isEnabled())
+        self.assertTrue(self.panel.next_hit.isEnabled())
+
+    def test_48_tab_order_and_enter_signal_connect_query_to_in(self):
+        self.assertIs(self.panel.query.nextInFocusChain(), self.panel.search_scope)
+        calls = []
+        with patch.object(self.panel, "_run_search", side_effect=lambda: calls.append(True)):
+            self.panel.search_scope.returnPressed.emit()
+        self.assertEqual([True], calls)
+
+    def test_49_text_zoom_controls_are_not_hit_navigation(self):
+        baseline = self.panel.context_zoom
+        self.panel.set_context_zoom(1)
+        self.assertEqual(baseline + 1, self.panel.context_zoom)
+        self.assertEqual("← Previous hit", self.panel.previous_hit.text())
+        self.assertEqual("Next hit →", self.panel.next_hit.text())
+
     def test_42_search_time_limit_is_a_profile_option(self):
         self.assertEqual(12, self.panel._profile()["options"]["search_time_limit_seconds"])
 
