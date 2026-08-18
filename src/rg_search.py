@@ -175,6 +175,47 @@ def build_command(query: str, profile: dict, config: dict) -> list[str]:
     return command
 
 
+def search_file_names(query: str, profile: dict, config: dict, cancel_event=None, deadline=None):
+    """Yield file-only matches whose names satisfy the same query grammar as content search."""
+    rg = locate_rg(config)
+    if not rg:
+        raise FileNotFoundError("ripgrep was not found. Set rg_path in rg-search.json.")
+    options = profile.get("options", {})
+    command = [rg, "--files"]
+    if options.get("hidden", False):
+        command.append("--hidden")
+    if options.get("follow_symlinks", False):
+        command.append("--follow")
+    if options.get("no_ignore", False):
+        command.append("--no-ignore")
+    if options.get("max_depth"):
+        command += ["--max-depth", str(options["max_depth"])]
+    for pattern in profile.get("exclude", []):
+        command += ["--glob", f"!{pattern}"]
+    command += profile.get("roots", [])
+    process = subprocess.Popen(
+        command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, encoding="utf-8", errors="replace", creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    try:
+        for raw in process.stdout:
+            if (cancel_event and cancel_event.is_set()) or (deadline and time.monotonic() >= deadline):
+                return
+            path = raw.strip()
+            if path and os.path.isfile(path) and matches_query(Path(path).name, query, options):
+                yield {"path": path, "line": None, "text": "Name match", "column": 0, "source": "name"}
+        stderr = process.stderr.read().strip()
+        code = process.wait()
+        if code > 1:
+            raise RuntimeError(stderr or f"ripgrep file listing exited with code {code}")
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+        process.stdout.close()
+        process.stderr.close()
+
+
 def _search_text(query: str, profile: dict, config: dict, cancel_event=None, deadline=None):
     if not _text_patterns(profile):
         return
@@ -384,10 +425,10 @@ def _search_documents(query: str, profile: dict, cancel_event=None, deadline=Non
             continue
 
 
-def search(query: str, profile: dict, config: dict, cancel_event=None):
+def search(query: str, profile: dict, config: dict, cancel_event=None, deadline=None):
     """Yield normalized text and document matches using one profile contract."""
     remaining = int(profile.get("options", {}).get("max_total_results", 5000))
-    deadline = time.monotonic() + int(profile.get("options", {}).get("search_time_limit_seconds", 12))
+    deadline = deadline or (time.monotonic() + int(profile.get("options", {}).get("search_time_limit_seconds", 12)))
     for source in (_search_text(query, profile, config, cancel_event, deadline), _search_documents(query, profile, cancel_event, deadline)):
         for match in source:
             if (cancel_event and cancel_event.is_set()) or time.monotonic() >= deadline:

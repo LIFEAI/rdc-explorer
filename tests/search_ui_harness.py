@@ -496,9 +496,69 @@ class PortableSearchHarness(unittest.TestCase):
         self.assertTrue(self.files.search_tree())
         wait_until(lambda: self.files.tree_search_button.isEnabled())
         self.assertGreater(self.files.search_results.topLevelItemCount(), 0)
-        directory = self.files.search_results.topLevelItem(0)
-        self.assertGreater(directory.childCount(), 0)
+        result = self.files.search_results.topLevelItem(0)
+        self.assertEqual(0, result.childCount())
+        self.assertTrue(result.data(0, Qt.ItemDataRole.UserRole)["path"])
         self.assertIn("needle", self.files.preview.toPlainText().lower())
+
+    def test_67_file_tree_search_matches_file_names_and_never_returns_directories(self):
+        named = self.root / "needle-name-only.txt"
+        named.write_text("unrelated content", encoding="utf-8")
+        image = self.root / "needle-image.png"
+        image.write_bytes(b"not image content")
+        self.files.tree_query.setText("needle-name-only")
+        self.assertTrue(self.files.search_tree())
+        wait_until(lambda: self.files.tree_search_button.isEnabled())
+        paths = [self.files.search_results.topLevelItem(index).data(0, Qt.ItemDataRole.UserRole)["path"] for index in range(self.files.search_results.topLevelItemCount())]
+        self.assertIn(str(named), paths)
+        self.assertTrue(all(Path(path).is_file() for path in paths))
+        self.files.tree_query.setText("needle-image")
+        self.assertTrue(self.files.search_tree())
+        wait_until(lambda: self.files.tree_search_button.isEnabled())
+        image_paths = [self.files.search_results.topLevelItem(index).data(0, Qt.ItemDataRole.UserRole)["path"] for index in range(self.files.search_results.topLevelItemCount())]
+        self.assertIn(str(image), image_paths)
+
+    def test_68_tree_drag_mime_keeps_native_reorder_and_preview_payloads(self):
+        folder = str(self.root / "deep")
+        target = str(self.root / "notes.md")
+        self.files.pin_paths([folder, target])
+        pinned = self.files.pins.topLevelItem(0)
+        item = pinned.child(1)
+        folder_path = pinned.child(0).data(0, Qt.ItemDataRole.UserRole)
+        target_path = item.data(0, Qt.ItemDataRole.UserRole)
+        payload = self.files.pins.mimeData([item])
+        payload.setData("application/x-rdc-pin-path", target_path.encode("utf-8"))
+        payload.setUrls([QUrl.fromLocalFile(target_path)])
+        self.assertTrue(payload.hasFormat("application/x-qabstractitemmodeldatalist"))
+        self.assertTrue(payload.hasFormat("application/x-rdc-pin-path"))
+        self.assertEqual(os.path.normcase(os.path.normpath(target_path)), os.path.normcase(os.path.normpath(payload.urls()[0].toLocalFile())))
+        before = self.files.pins.visualItemRect(pinned.child(0))
+        self.files.pins._dragging_pinned = True
+        event = QDropEvent(QPointF(before.center().x(), before.top() + 1), Qt.DropAction.MoveAction, payload,
+                           Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+        self.files.pins.dropEvent(event)
+        QApplication.processEvents()
+        self.assertEqual([target_path, folder_path], rdc_dashboard.mru.get_pinned_locations())
+
+    def test_69_tree_drag_onto_a_root_keeps_the_pin_group_intact(self):
+        folder = str(self.root / "deep")
+        target = str(self.root / "notes.md")
+        self.files.pin_paths([folder, target])
+        pinned = self.files.pins.topLevelItem(0)
+        item = pinned.child(1)
+        payload = self.files.pins.mimeData([item])
+        source_path = item.data(0, Qt.ItemDataRole.UserRole)
+        payload.setData("application/x-rdc-pin-path", source_path.encode("utf-8"))
+        payload.setUrls([QUrl.fromLocalFile(source_path)])
+        expected = list(rdc_dashboard.mru.get_pinned_locations())
+        configured_root = self.files.pins.topLevelItem(1)
+        target_rect = self.files.pins.visualItemRect(configured_root)
+        self.files.pins._dragging_pinned = True
+        event = QDropEvent(QPointF(target_rect.center()), Qt.DropAction.MoveAction, payload,
+                           Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+        self.files.pins.dropEvent(event)
+        QApplication.processEvents()
+        self.assertEqual(expected, rdc_dashboard.mru.get_pinned_locations())
 
     def test_55_clear_tree_search_returns_to_live_filesystem_tree(self):
         self.files.tree_query.setText("needle")
@@ -545,7 +605,7 @@ class PortableSearchHarness(unittest.TestCase):
         pinned = self.files.pins.topLevelItem(0)
         self.assertEqual("Pinned", pinned.text(0))
         self.assertTrue(pinned.isExpanded())
-        self.assertEqual(self.files.pins.parentWidget(), self.files.tree_stack.parentWidget())
+        self.assertIs(self.files.tree_stack.widget(0), self.files.pins)
 
     def test_61_settings_root_list_add_remove_and_save_are_directly_controllable(self):
         other = self.root / "settings-root"

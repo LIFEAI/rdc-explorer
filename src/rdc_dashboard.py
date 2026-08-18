@@ -17,6 +17,7 @@ import copy
 import re
 import subprocess
 import shutil
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -186,7 +187,7 @@ class DropFileList(QListWidget):
 
 
 class PinTree(QTreeWidget):
-    """Persistent locations that accept a file/folder drop without moving it on disk."""
+    """One Explorer navigation tree: pins, configured roots, and their filesystem children."""
     pin_paths_dropped = pyqtSignal(list)
     location_activated = pyqtSignal(str)
     pin_order_changed = pyqtSignal(list)
@@ -202,6 +203,7 @@ class PinTree(QTreeWidget):
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self._request_context)
         self.itemActivated.connect(lambda item, _column: self.location_activated.emit(item.data(0, Qt.ItemDataRole.UserRole) or ""))
+        self._dragging_pinned = False
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls() or event.mimeData().hasFormat("application/x-rdc-pin-path"):
@@ -213,15 +215,47 @@ class PinTree(QTreeWidget):
         self.dragEnterEvent(event)
 
     def dropEvent(self, event):
+        if self._dragging_pinned and event.mimeData().hasFormat("application/x-rdc-pin-path"):
+            pinned = self.topLevelItem(0) if self.topLevelItemCount() else None
+            destination = self.itemAt(event.position().toPoint())
+            if not pinned or not destination or destination.parent() is not pinned:
+                self._dragging_pinned = False
+                event.ignore()
+                return
+            source_path = bytes(event.mimeData().data("application/x-rdc-pin-path")).decode("utf-8")
+            before_order = [pinned.child(index).data(0, Qt.ItemDataRole.UserRole)
+                            for index in range(pinned.childCount())]
+            super().dropEvent(event)
+            order = [pinned.child(index).data(0, Qt.ItemDataRole.UserRole) for index in range(pinned.childCount())]
+            # Qt's native drop can decline a programmatically-constructed event; retain its
+            # ordering when it succeeds and make the same move as a deterministic fallback.
+            if order == before_order:
+                source_index = next((index for index, path in enumerate(order) if path == source_path), -1)
+                if source_index >= 0 and destination is not pinned.child(source_index):
+                    destination_index = pinned.indexOfChild(destination)
+                    source_item = pinned.takeChild(source_index)
+                    if source_index < destination_index:
+                        destination_index -= 1
+                    if event.position().y() >= self.visualItemRect(destination).center().y():
+                        destination_index += 1
+                    pinned.insertChild(destination_index, source_item)
+                    order = [pinned.child(index).data(0, Qt.ItemDataRole.UserRole) for index in range(pinned.childCount())]
+            self.pin_order_changed.emit(order)
+            self._dragging_pinned = False
+            return
         paths = [url.toLocalFile() for url in event.mimeData().urls() if url.isLocalFile()]
         if paths:
             self.pin_paths_dropped.emit(paths)
             event.acceptProposedAction()
             return
+        if event.mimeData().hasFormat("application/x-rdc-pin-path") and not self._dragging_pinned:
+            event.ignore()
+            return
         super().dropEvent(event)
-        pinned = self.topLevelItem(1) if self.topLevelItemCount() > 1 else None
+        pinned = self.topLevelItem(0) if self.topLevelItemCount() else None
         if pinned:
             self.pin_order_changed.emit([pinned.child(index).data(0, Qt.ItemDataRole.UserRole) for index in range(pinned.childCount())])
+        self._dragging_pinned = False
 
     def _request_context(self, position):
         item = self.itemAt(position)
@@ -234,8 +268,10 @@ class PinTree(QTreeWidget):
         path = item.data(0, Qt.ItemDataRole.UserRole) if item else ""
         if not path:
             return
-        mime = QMimeData()
+        self._dragging_pinned = item.parent() is self.topLevelItem(0)
+        mime = self.mimeData([item])
         mime.setData("application/x-rdc-pin-path", str(path).encode("utf-8"))
+        mime.setUrls([QUrl.fromLocalFile(str(path))])
         from PyQt6.QtGui import QDrag
         drag = QDrag(self)
         drag.setMimeData(mime)
@@ -305,51 +341,39 @@ class FilePanel(QWidget):
         layout = QVBoxLayout(self)
 
         search_row = QHBoxLayout()
-        search_row.addWidget(QLabel("Find in this folder:"))
+        search_row.addWidget(QLabel("Search files:"))
         self.tree_query = QLineEdit()
-        self.tree_query.setPlaceholderText('Words or "phrase"  •  Enter searches the active folder')
+        self.tree_query.setPlaceholderText('Names and contents  •  Enter searches the selected folder')
         self.tree_query.returnPressed.connect(self.search_tree)
         search_row.addWidget(self.tree_query, 1)
-        self.tree_search_button = QPushButton("Search tree")
+        self.tree_search_button = QPushButton("Search")
         self.tree_search_button.clicked.connect(self.search_tree)
         search_row.addWidget(self.tree_search_button)
-        self.tree_clear_button = QPushButton("Show folders")
+        self.tree_clear_button = QPushButton("Browse")
         self.tree_clear_button.clicked.connect(self.clear_tree_search)
         search_row.addWidget(self.tree_clear_button)
-        self.tree_status = QLabel("Browse a folder, then search its contents.")
+        self.tree_status = QLabel("Select a folder, then search its names and contents.")
         search_row.addWidget(self.tree_status)
         layout.addLayout(search_row)
 
-        # One navigation column: pinned entries, then actual folders/files.
+        # One continuous Explorer navigation column: Pinned, then configured roots.
         navigation = QWidget()
         nv = QVBoxLayout(navigation)
         nv.setContentsMargins(0, 0, 0, 0)
-        self.pins = PinTree()
-        self.pins.pin_paths_dropped.connect(self.pin_paths)
-        self.pins.location_activated.connect(self.open_pinned)
-        self.pins.pin_order_changed.connect(mru.set_pinned_locations)
-        self.pins.context_requested.connect(self.show_location_menu)
-        nv.addWidget(self.pins)
-        self._refresh_pins()
-
-        label = QLabel("Folders and files"); label.setObjectName("section_title")
-        nv.addWidget(label)
-        self.model = QFileSystemModel()
-        self.model.setRootPath(QDir.rootPath())
-        self.tree = NavigableFileTree()
-        self.tree.setModel(self.model)
-        self.tree.setDragEnabled(True)
-        self.tree.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
-        self.tree.hideColumn(1); self.tree.hideColumn(2); self.tree.hideColumn(3)
+        self.tree = PinTree()
+        self.pins = self.tree  # Compatibility seam: the visible pin group is part of this same tree.
+        self.tree.pin_paths_dropped.connect(self.pin_paths)
+        self.tree.location_activated.connect(self.activate_tree_path)
+        self.tree.pin_order_changed.connect(mru.set_pinned_locations)
+        self.tree.context_requested.connect(self.show_file_menu)
+        self.tree.itemExpanded.connect(self._load_directory_children)
+        self.tree.itemSelectionChanged.connect(self._select_tree_item)
         root = self.roots[0] if self.roots else ""
         self.current_root = root if root and os.path.isdir(root) else QDir.rootPath()
-        self.tree.setRootIndex(self.model.index(self.current_root))
-        self.tree.doubleClicked.connect(self._open_file)
-        self.tree.pin_dropped.connect(self.open_pinned)
-        self.tree.context_requested.connect(self.show_file_menu)
+        self._refresh_pins()
 
         self.search_results = QTreeWidget()
-        self.search_results.setHeaderLabels(["Directory / file", "Matches"])
+        self.search_results.setHeaderLabels(["File", "Match"])
         self.search_results.itemSelectionChanged.connect(self._show_tree_match)
         self.tree_stack = QStackedWidget()
         self.tree_stack.addWidget(self.tree)
@@ -378,8 +402,10 @@ class FilePanel(QWidget):
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(navigation)
         splitter.addWidget(preview)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
         splitter.setSizes([430, 890])
-        layout.addWidget(splitter)
+        layout.addWidget(splitter, 1)
 
     def preview_drop(self, paths):
         """Drop a left-tree file/folder on the right preview: inspect or navigate it."""
@@ -412,8 +438,105 @@ class FilePanel(QWidget):
             self.open_pinned(self.roots[0])
         self._refresh_pins()
 
-    def _open_file(self, idx: QModelIndex):
-        path = self.model.filePath(idx)
+    @staticmethod
+    def _kind(item):
+        return item.data(0, Qt.ItemDataRole.UserRole + 1) if item else ""
+
+    @staticmethod
+    def _set_tree_path(item, path, kind):
+        item.setData(0, Qt.ItemDataRole.UserRole, path)
+        item.setData(0, Qt.ItemDataRole.UserRole + 1, kind)
+
+    def _refresh_pins(self):
+        """Rebuild the single navigation tree without creating separate pin/file panes."""
+        self.tree.clear()
+        pinned = QTreeWidgetItem(["Pinned"])
+        pinned.setFlags(pinned.flags() & ~Qt.ItemFlag.ItemIsDragEnabled)
+        self.tree.addTopLevelItem(pinned)
+        for path in mru.get_pinned_locations():
+            item = QTreeWidgetItem([Path(path).name or path])
+            self._set_tree_path(item, path, "pinned")
+            item.setToolTip(0, path)
+            pinned.addChild(item)
+        for root in self.roots:
+            item = QTreeWidgetItem([Path(root).name or root])
+            self._set_tree_path(item, root, "directory")
+            item.setToolTip(0, root)
+            item.setChildIndicatorPolicy(QTreeWidgetItem.ChildIndicatorPolicy.ShowIndicator)
+            self.tree.addTopLevelItem(item)
+        self.tree.expandItem(pinned)
+
+    def _load_directory_children(self, item):
+        if self._kind(item) not in {"directory", "pinned"}:
+            return
+        path = item.data(0, Qt.ItemDataRole.UserRole)
+        if not path or not os.path.isdir(path) or item.data(0, Qt.ItemDataRole.UserRole + 2):
+            return
+        item.takeChildren()
+        try:
+            entries = sorted(Path(path).iterdir(), key=lambda entry: (not entry.is_dir(), entry.name.casefold()))
+        except OSError:
+            entries = []
+        for entry in entries[:500]:
+            child = QTreeWidgetItem([entry.name])
+            kind = "directory" if entry.is_dir() else "file"
+            self._set_tree_path(child, str(entry), kind)
+            child.setToolTip(0, str(entry))
+            if kind == "directory":
+                child.setChildIndicatorPolicy(QTreeWidgetItem.ChildIndicatorPolicy.ShowIndicator)
+            item.addChild(child)
+        if len(entries) > 500:
+            item.addChild(QTreeWidgetItem(["More than 500 items; refine the folder before browsing."]))
+        item.setData(0, Qt.ItemDataRole.UserRole + 2, True)
+
+    def _select_tree_item(self):
+        selected = self.tree.selectedItems()
+        item = selected[0] if selected else None
+        path = item.data(0, Qt.ItemDataRole.UserRole) if item else ""
+        if not path:
+            return
+        if os.path.isdir(path):
+            self.current_root = path
+            self.tree_status.setText(f"Browsing {path}")
+        elif os.path.isfile(path):
+            self.show_preview(path)
+
+    def _focus_path(self, path):
+        """Expand the configured-root branch that owns a path, then select it when loaded."""
+        normalized = os.path.normcase(os.path.normpath(path))
+        for index in range(1, self.tree.topLevelItemCount()):
+            root = self.tree.topLevelItem(index)
+            root_path = os.path.normcase(os.path.normpath(root.data(0, Qt.ItemDataRole.UserRole)))
+            try:
+                inside = os.path.commonpath([normalized, root_path]) == root_path
+            except ValueError:
+                inside = False
+            if not inside:
+                continue
+            self._load_directory_children(root)
+            self.tree.expandItem(root)
+            current, current_path = root, root_path
+            parts = Path(os.path.normpath(path)).parts[len(Path(os.path.normpath(root_path)).parts):]
+            for part in parts:
+                self._load_directory_children(current)
+                current = next((current.child(child_index) for child_index in range(current.childCount()) if current.child(child_index).text(0) == part), None)
+                if current is None:
+                    break
+                current_path = os.path.join(current_path, part)
+                self.tree.expandItem(current)
+            if current is not None:
+                self.tree.setCurrentItem(current)
+                self.tree.scrollToItem(current)
+            return
+
+    def activate_tree_path(self, path):
+        item = self.tree.currentItem()
+        if self._kind(item) == "file":
+            self._open_file(path)
+            return
+        self.open_pinned(path)
+
+    def _open_file(self, path):
         if os.path.isfile(path):
             mru.add_file(path)
             self.show_preview(path)
@@ -433,18 +556,6 @@ class FilePanel(QWidget):
             elif sys.platform == "darwin":
                 os.system(f'open "{root}"')
 
-    def _refresh_pins(self):
-        self.pins.clear()
-        pinned = QTreeWidgetItem(["Pinned"])
-        pinned.setFlags(pinned.flags() & ~Qt.ItemFlag.ItemIsDragEnabled)
-        self.pins.addTopLevelItem(pinned)
-        for path in mru.get_pinned_locations():
-            item = QTreeWidgetItem([Path(path).name])
-            item.setData(0, Qt.ItemDataRole.UserRole, path)
-            item.setToolTip(0, path)
-            pinned.addChild(item)
-        self.pins.expandAll()
-
     def pin_paths(self, paths):
         for path in paths:
             path = os.path.normpath(path)
@@ -456,7 +567,8 @@ class FilePanel(QWidget):
 
     def pin_selected(self):
         if self.tree_stack.currentWidget() is self.tree:
-            path = self.model.filePath(self.tree.currentIndex())
+            item = self.tree.currentItem()
+            path = item.data(0, Qt.ItemDataRole.UserRole) if item else ""
             if path:
                 self.pin_paths([path])
 
@@ -490,6 +602,9 @@ class FilePanel(QWidget):
         menu.exec(position)
 
     def show_file_menu(self, path, position):
+        if path in mru.get_pinned_locations():
+            self.show_location_menu(path, position)
+            return
         menu = QMenu(self)
         menu.addAction("Open", lambda: self._open_path(path))
         menu.addAction("Pin", lambda: self.pin_paths([path]))
@@ -571,7 +686,7 @@ class FilePanel(QWidget):
         target = path if os.path.isdir(path) else str(Path(path).parent)
         if os.path.isdir(target):
             self.current_root = target
-            self.tree.setRootIndex(self.model.index(target))
+            self._focus_path(path)
             self.clear_tree_search()
         if os.path.isfile(path):
             self.show_preview(path)
@@ -614,11 +729,31 @@ class FilePanel(QWidget):
     def _tree_search_worker(self, generation, query, profile, config, cancel_event):
         try:
             batch = []
-            for match in rg_search.search(query, profile, config, cancel_event):
+            seen_paths = set()
+            max_files = profile["options"]["max_total_results"]
+            deadline = time.monotonic() + profile["options"]["search_time_limit_seconds"]
+            name_budget = max(1, max_files // 2)
+            for match in rg_search.search_file_names(query, profile, config, cancel_event, deadline):
+                if (cancel_event and cancel_event.is_set()) or time.monotonic() >= deadline or len(seen_paths) >= name_budget:
+                    break
+                if match["path"] not in seen_paths:
+                    seen_paths.add(match["path"])
+                    batch.append(match)
+                if len(batch) >= 50:
+                    self.signals.result.emit((generation, batch))
+                    batch = []
+            for match in rg_search.search(query, profile, config, cancel_event, deadline):
+                if (cancel_event and cancel_event.is_set()) or time.monotonic() >= deadline or len(seen_paths) >= max_files:
+                    break
+                if match["path"] in seen_paths:
+                    continue
+                seen_paths.add(match["path"])
                 batch.append(match)
                 if len(batch) >= 50:
                     self.signals.result.emit((generation, batch))
                     batch = []
+                if len(seen_paths) >= max_files:
+                    break
             if batch:
                 self.signals.result.emit((generation, batch))
         except Exception as exc:
@@ -632,29 +767,15 @@ class FilePanel(QWidget):
             return
         for match in matches:
             path = Path(match["path"])
-            directory_key = str(path.parent)
-            directory = self.tree_matches.get(directory_key)
-            if directory is None:
-                directory = QTreeWidgetItem([SearchPanel.compact_path(directory_key), ""])
-                directory.setToolTip(0, directory_key)
-                self.search_results.addTopLevelItem(directory)
-                self.tree_matches[directory_key] = directory
-            file_item = None
-            for index in range(directory.childCount()):
-                child = directory.child(index)
-                if child.data(0, Qt.ItemDataRole.UserRole + 1) == match["path"]:
-                    file_item = child
-                    break
-            if file_item is None:
-                file_item = QTreeWidgetItem([path.name, ""])
-                file_item.setData(0, Qt.ItemDataRole.UserRole + 1, match["path"])
-                directory.addChild(file_item)
-            hit = QTreeWidgetItem([f"line {match['line']}", match["text"].strip()])
-            hit.setData(0, Qt.ItemDataRole.UserRole, match)
-            file_item.addChild(hit)
-            file_item.setText(1, f"{file_item.childCount()} hit{'s' if file_item.childCount() != 1 else ''}")
-            if self.search_results.topLevelItemCount() == 1 and file_item.childCount() == 1:
-                self.search_results.setCurrentItem(hit)
+            if match["path"] in self.tree_matches:
+                continue
+            file_item = QTreeWidgetItem([path.name, match["text"].strip() or "Content match"])
+            file_item.setData(0, Qt.ItemDataRole.UserRole, match)
+            file_item.setToolTip(0, match["path"])
+            self.search_results.addTopLevelItem(file_item)
+            self.tree_matches[match["path"]] = file_item
+            if self.search_results.topLevelItemCount() == 1:
+                self.search_results.setCurrentItem(file_item)
 
     def _tree_search_failed(self, payload):
         generation, message = payload
@@ -664,7 +785,7 @@ class FilePanel(QWidget):
     def _tree_search_finished(self, generation):
         if generation == self.search_generation:
             self.tree_search_button.setEnabled(True)
-            count = sum(self.search_results.topLevelItem(i).childCount() for i in range(self.search_results.topLevelItemCount()))
+            count = self.search_results.topLevelItemCount()
             self.tree_status.setText(f"{count} matching files in {self.current_root}")
 
     def clear_tree_search(self):
